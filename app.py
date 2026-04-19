@@ -7,7 +7,7 @@ from scipy import stats
 from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSearchCV, cross_val_score
 from sklearn.preprocessing import (
     StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer, 
-    OneHotEncoder, LabelEncoder, OrdinalEncoder
+    OneHotEncoder, LabelEncoder, OrdinalEncoder, FunctionTransformer
 )
 from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.compose import ColumnTransformer
@@ -91,7 +91,7 @@ if 'df' not in st.session_state:
     st.session_state.task_type = None
     st.session_state.target_col = None
     st.session_state.drop_cols = []
-    st.session_state.col_types = {}          # kullanıcının atadığı tipler
+    st.session_state.col_types = {}
     st.session_state.preprocessing = {}
     st.session_state.model = None
     st.session_state.metrics = None
@@ -121,12 +121,10 @@ if st.session_state.stage == "📁 Veri Yükleme":
             else:
                 df = pd.read_csv(uploaded_file, sep='\t')
             st.session_state.df = df.copy()
-            # Otomatik tip önerileri
             for col in df.columns:
                 if pd.api.types.is_numeric_dtype(df[col]):
                     st.session_state.col_types[col] = "numeric"
                 else:
-                    # tarih kontrolü
                     try:
                         pd.to_datetime(df[col], errors='raise')
                         st.session_state.col_types[col] = "date"
@@ -141,14 +139,13 @@ if st.session_state.stage == "📁 Veri Yükleme":
             st.session_state.stage = "🎯 Görev Seçimi"
             st.rerun()
 
-# ----- 2. GÖREV SEÇİMİ (Öneri ile) -----
+# ----- 2. GÖREV SEÇİMİ -----
 elif st.session_state.stage == "🎯 Görev Seçimi":
     st.header("Görev Tipi Seçimi")
     if st.session_state.df is None:
         st.warning("Lütfen önce veri yükleyin.")
     else:
         df = st.session_state.df
-        # Öneri (hedef değişken seçilmişse)
         if st.session_state.target_col:
             target = df[st.session_state.target_col]
             if st.session_state.col_types.get(st.session_state.target_col) in ["categorical"] or target.nunique() <= 10:
@@ -163,7 +160,7 @@ elif st.session_state.stage == "🎯 Görev Seçimi":
             st.session_state.stage = "⚙️ Değişken Tipleri"
             st.rerun()
 
-# ----- 3. EDA (Gelişmiş İstatistik + Küçük Görseller) -----
+# ----- 3. EDA -----
 elif st.session_state.stage == "📊 EDA":
     st.header("Keşifsel Veri Analizi - İstatistik Raporu")
     df = st.session_state.df
@@ -190,7 +187,6 @@ elif st.session_state.stage == "📊 EDA":
                     - {normality_suggestion(stat['skew'], stat['kurtosis'], stat.get('shapiro_p'))}
                     - {outlier_suggestion(stat['outlier_ratio_iqr'])}
                     """)
-                # Küçük histogram
                 fig, ax = plt.subplots(figsize=(4,2))
                 sns.histplot(df[col].dropna(), kde=True, ax=ax, color='#3dff8f')
                 ax.set_title(col, fontsize=8)
@@ -268,7 +264,7 @@ elif st.session_state.stage == "🧹 Ön İşleme":
         date_cols = [c for c in df.columns if col_types.get(c)=="date" and c not in drop and c!=target]
         
         st.subheader("Eksik Değer Stratejileri")
-        missing_num = st.selectbox("Sayısal eksik değer stratejisi", ["Ortalama", "Medyan", "KNN Impute", "EM (Iterative Imputer)", "Sil"])
+        missing_num = st.selectbox("Sayısal eksik değer stratejisi", ["Ortalama", "Medyan", "KNN Impute", "Sil"])
         missing_cat = st.selectbox("Kategorik eksik değer stratejisi", ["Mod", "Sabit (Missing)", "Sil"])
         
         st.subheader("Aykırı Değer Stratejisi (Sayısal)")
@@ -280,13 +276,12 @@ elif st.session_state.stage == "🧹 Ön İşleme":
         scaling = st.selectbox("Ölçeklendirme", ["StandardScaler", "MinMaxScaler", "RobustScaler", "Yok"])
         
         st.subheader("Kategorik Değişken Kodlama")
-        encoding = st.selectbox("Kodlama yöntemi", ["OneHot", "Label", "Target Encoding (hedefe bağlı)", "Frequency Encoding"])
+        encoding = st.selectbox("Kodlama yöntemi", ["OneHot", "Label", "Frequency Encoding"])
         
         st.subheader("Feature Engineering (İsteğe bağlı)")
         add_poly = st.checkbox("Polinom özellikler (2. derece)")
         add_interaction = st.checkbox("Etkileşim terimleri")
         
-        # Seçimleri kaydet
         st.session_state.preprocessing = {
             'missing_num': missing_num,
             'missing_cat': missing_cat,
@@ -319,12 +314,10 @@ elif st.session_state.stage == "🤖 Modelleme":
         numeric_cols = [c for c in X.columns if col_types.get(c)=="numeric"]
         categorical_cols = [c for c in X.columns if col_types.get(c)=="categorical"]
         
-        # Pipeline oluşturma (ön işleme + model)
         transformers = []
         # Sayısal pipeline
         if numeric_cols:
             num_steps = []
-            # Eksik değer
             if prep['missing_num'] == "Ortalama":
                 num_steps.append(('imputer', SimpleImputer(strategy='mean')))
             elif prep['missing_num'] == "Medyan":
@@ -333,15 +326,13 @@ elif st.session_state.stage == "🤖 Modelleme":
                 num_steps.append(('imputer', KNNImputer(n_neighbors=5)))
             else:
                 num_steps.append(('imputer', SimpleImputer(strategy='constant', fill_value=0)))
-            # Aykırı değer (basit clipping, daha gelişmiş için custom transformer gerekir, burada clip ile)
+            # Aykırı değer clipping (basit)
             if prep['outlier_method'] == "Clip (min-max)":
-                num_steps.append(('clip', FunctionTransformer(lambda x: np.clip(x, x.quantile(0.01), x.quantile(0.99)))))
-            # Dönüşüm
+                num_steps.append(('clip', FunctionTransformer(lambda x: np.clip(x, np.percentile(x, 1), np.percentile(x, 99)))))
             if prep['power'] == "Box-Cox":
                 num_steps.append(('power', PowerTransformer(method='box-cox')))
             elif prep['power'] == "Yeo-Johnson":
                 num_steps.append(('power', PowerTransformer(method='yeo-johnson')))
-            # Ölçeklendirme
             if prep['scaling'] == "StandardScaler":
                 num_steps.append(('scaler', StandardScaler()))
             elif prep['scaling'] == "MinMaxScaler":
@@ -359,18 +350,23 @@ elif st.session_state.stage == "🤖 Modelleme":
                 cat_steps.append(('imputer', SimpleImputer(strategy='constant', fill_value='missing')))
             if prep['encoding'] == "OneHot":
                 cat_steps.append(('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False)))
-            else:
-                # Label encoding (basit)
+            elif prep['encoding'] == "Label":
                 cat_steps.append(('encoder', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)))
+            else:  # Frequency Encoding (basit)
+                freq_map = {col: df[col].value_counts().to_dict() for col in categorical_cols}
+                def freq_encode(X):
+                    X_enc = X.copy()
+                    for col in categorical_cols:
+                        X_enc[col] = X[col].map(freq_map.get(col, {}))
+                    return X_enc
+                cat_steps.append(('encoder', FunctionTransformer(freq_encode)))
             transformers.append(('cat', Pipeline(cat_steps), categorical_cols))
         
         preprocessor = ColumnTransformer(transformers, remainder='drop')
         
-        # Model seçimi
         task = st.session_state.task_type
         if task == "sınıflandırma":
             model_name = st.selectbox("Model", ["Lojistik Regresyon", "Random Forest", "XGBoost", "SVM"])
-            # Manuel hiperparametreler
             st.subheader("Hiperparametreler (manuel)")
             if model_name == "Lojistik Regresyon":
                 C = st.number_input("C (regularizasyon)", 0.01, 10.0, 1.0)
@@ -401,7 +397,7 @@ elif st.session_state.stage == "🤖 Modelleme":
                 n_est = st.slider("n_estimators", 10, 300, 100)
                 lr = st.number_input("learning_rate", 0.01, 0.5, 0.1)
                 model = xgb.XGBRegressor(n_estimators=n_est, learning_rate=lr)
-        else:  # kümeleme
+        else:
             model_name = st.selectbox("Model", ["K-Means", "DBSCAN"])
             if model_name == "K-Means":
                 n_clusters = st.slider("küme sayısı", 2, 10, 3)
@@ -417,12 +413,10 @@ elif st.session_state.stage == "🤖 Modelleme":
         if st.button("Modeli Eğit (Data Leakage Yok)"):
             with st.spinner("Eğitim başladı..."):
                 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42, stratify=y if task=="sınıflandırma" else None)
-                # Pipeline oluştur (preprocess + model)
                 pipeline = Pipeline(steps=[('preprocessor', preprocessor), ('model', model)])
                 pipeline.fit(X_train, y_train)
                 st.session_state.model = pipeline
                 
-                # Değerlendirme
                 y_pred_train = pipeline.predict(X_train)
                 y_pred_test = pipeline.predict(X_test)
                 
@@ -447,7 +441,6 @@ elif st.session_state.stage == "🤖 Modelleme":
                         'overfit': (train_rmse < test_rmse * 0.8)
                     }
                 else:
-                    # clustering
                     X_processed = preprocessor.fit_transform(X)
                     model.fit(X_processed)
                     if hasattr(model, 'labels_') and len(set(model.labels_)) > 1:
@@ -456,7 +449,6 @@ elif st.session_state.stage == "🤖 Modelleme":
                         sil = -1
                     st.session_state.metrics = {'silhouette': sil}
                 
-                # Feature importance (varsa)
                 if hasattr(pipeline.named_steps['model'], 'feature_importances_'):
                     st.session_state.feature_importance = pipeline.named_steps['model'].feature_importances_
                 
@@ -464,7 +456,7 @@ elif st.session_state.stage == "🤖 Modelleme":
                 st.session_state.stage = "📈 Sonuçlar"
                 st.rerun()
 
-# ----- 7. SONUÇLAR (Overfit, Feature Importance) -----
+# ----- 7. SONUÇLAR -----
 elif st.session_state.stage == "📈 Sonuçlar":
     st.header("Model Performansı ve İstatistiksel Değerlendirme")
     if st.session_state.metrics is None:
@@ -499,7 +491,7 @@ elif st.session_state.stage == "📈 Sonuçlar":
             st.session_state.stage = "🔮 Canlı Tahmin"
             st.rerun()
 
-# ----- 8. CANLI TAHMİN (Değişken bilgileriyle) -----
+# ----- 8. CANLI TAHMİN -----
 elif st.session_state.stage == "🔮 Canlı Tahmin":
     st.header("Canlı Tahmin Aracı")
     if st.session_state.model is None:
