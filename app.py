@@ -65,7 +65,7 @@ if 'df' not in st.session_state:
         'content_cols': []
     })
 
-# ------------------ İSTATİSTİKSEL ANALİZ MOTORU (DÜZELTİLMİŞ) ------------------
+# ------------------ İSTATİSTİKSEL ANALİZ MOTORU (TAM DÜZELTİLMİŞ) ------------------
 class StatisticalEngine:
     @staticmethod
     def normality_test(data, col):
@@ -128,10 +128,12 @@ class StatisticalEngine:
     
     @staticmethod
     def outlier_detection(data, method='iqr', contamination=0.1):
-        # SADECE SAYISAL SÜTUNLARI AL
-        num_data = data.select_dtypes(include=[np.number])
+        # Sadece sayısal sütunlar
+        num_data = data.select_dtypes(include=[np.number]).copy()
         if num_data.empty:
             return pd.Series([False] * len(data))
+        # NaN'leri medyan ile doldur
+        num_data = num_data.fillna(num_data.median())
         
         if method == 'iqr':
             outliers = pd.DataFrame(index=data.index)
@@ -143,25 +145,21 @@ class StatisticalEngine:
             return outliers.any(axis=1)
         elif method == 'zscore':
             from scipy.stats import zscore
-            # Sadece sayısal sütunların median'ı ile doldur
-            filled = num_data.fillna(num_data.median())
-            z_scores = np.abs(zscore(filled))
+            z_scores = np.abs(zscore(num_data))
             return (z_scores > 3).any(axis=1)
         elif method == 'isolation_forest':
             iso = IsolationForest(contamination=contamination, random_state=42)
-            filled = num_data.fillna(num_data.median())
-            preds = iso.fit_predict(filled)
+            preds = iso.fit_predict(num_data)
             return preds == -1
         return pd.Series([False] * len(data))
     
     @staticmethod
     def pca_analysis(data, n_components=2, scale=True):
-        # SADECE SAYISAL SÜTUNLARI AL
-        num_data = data.select_dtypes(include=[np.number])
+        # Sadece sayısal sütunlar
+        num_data = data.select_dtypes(include=[np.number]).copy()
         if num_data.empty:
             return np.array([]), np.array([]), None
-        
-        # Sadece sayısal sütunların median'ı ile doldur
+        # NaN'leri medyan ile doldur
         num_data = num_data.fillna(num_data.median())
         
         if scale:
@@ -238,7 +236,6 @@ class HybridRecommender:
         collab_recs = self.recommend_collaborative(user_id, top_k=top_k*2)
         content_recs = []
         if item_id:
-            # İçerik bazlı öneri (opsiyonel)
             pass
         combined = {}
         for item, score in collab_recs:
@@ -263,9 +260,16 @@ def main():
         if uploaded_file:
             try:
                 if uploaded_file.name.endswith('.csv'):
-                    st.session_state.df = pd.read_csv(uploaded_file)
+                    df = pd.read_csv(uploaded_file)
                 else:
-                    st.session_state.df = pd.read_excel(uploaded_file, engine='openpyxl')
+                    df = pd.read_excel(uploaded_file, engine='openpyxl')
+                # NaN'leri temizle (tüm sayısal sütunlarda medyan ile doldur)
+                for col in df.columns:
+                    if df[col].dtype in ['int64', 'float64']:
+                        df[col].fillna(df[col].median(), inplace=True)
+                    else:
+                        df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else "Unknown", inplace=True)
+                st.session_state.df = df
                 st.success(f"✅ {st.session_state.df.shape[0]} satır, {st.session_state.df.shape[1]} sütun")
             except Exception as e:
                 st.error(f"Hata: {e}")
@@ -331,7 +335,7 @@ def main():
             if outliers.sum() > 0:
                 st.dataframe(df[outliers].head())
     
-    # ---------- TAB 2 (ML Model) ----------
+    # ---------- TAB 2 ----------
     with tabs[1]:
         st.header("🤖 AutoML Eğitimi")
         n_est = st.slider("N_estimators", 50, 500, 100)
@@ -341,7 +345,7 @@ def main():
             X = df.drop(columns=[st.session_state.target])
             y = df[st.session_state.target]
             
-            # Sayısal/kategorik ayrımı güçlendir
+            # Sayısal/kategorik ayrımı
             for col in X.columns:
                 if X[col].dtype == 'object':
                     try:
@@ -352,7 +356,6 @@ def main():
             numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
             categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
             
-            # Geriye kalanları kategorik say
             for col in X.columns:
                 if col not in numeric_cols and col not in categorical_cols:
                     categorical_cols.append(col)
@@ -402,7 +405,6 @@ def main():
                 col1.metric("R²", f"{r2:.4f}")
                 col2.metric("MAPE", f"{mape:.2%}")
             
-            # Feature importance
             try:
                 if hasattr(full_pipe.named_steps['model'], 'feature_importances_'):
                     importances = full_pipe.named_steps['model'].feature_importances_
@@ -421,7 +423,7 @@ def main():
             model_bytes = pickle.dumps(full_pipe)
             st.download_button("💾 Modeli İndir (.pkl)", data=model_bytes, file_name="model.pkl")
     
-    # ---------- TAB 3 (Öneri Sistemi) ----------
+    # ---------- TAB 3 ----------
     with tabs[2]:
         st.header("🎯 Hibrit Öneri Sistemi")
         user_col = st.selectbox("Kullanıcı ID sütunu", df.columns, key="user_col")
@@ -456,7 +458,7 @@ def main():
                 else:
                     st.info("Öneri yok.")
     
-    # ---------- TAB 4 (Production) ----------
+    # ---------- TAB 4 ----------
     with tabs[3]:
         st.header("🏭 Production Özellikleri")
         if st.session_state.model:
