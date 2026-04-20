@@ -65,8 +65,28 @@ if 'df' not in st.session_state:
         'content_cols': []
     })
 
-# ------------------ İSTATİSTİKSEL ANALİZ MOTORU (TAM DÜZELTİLMİŞ) ------------------
+# ------------------ İSTATİSTİKSEL ANALİZ MOTORU (GELİŞMİŞ NaN YÖNETİMİ) ------------------
 class StatisticalEngine:
+    @staticmethod
+    def _clean_numeric_data(data):
+        """Sayısal verileri NaN'lere karşı temizler, tamamen boş sütunları kaldırır."""
+        num_data = data.select_dtypes(include=[np.number]).copy()
+        if num_data.empty:
+            return num_data
+        
+        # Tamamen boş sütunları kaldır
+        num_data = num_data.dropna(axis=1, how='all')
+        
+        # Kalan sütunlardaki NaN'leri medyan ile doldur
+        for col in num_data.columns:
+            if num_data[col].isnull().all():
+                # Eğer hala tamamen boşsa, 0 ile doldur
+                num_data[col].fillna(0, inplace=True)
+            else:
+                num_data[col].fillna(num_data[col].median(), inplace=True)
+        
+        return num_data
+
     @staticmethod
     def normality_test(data, col):
         ser = data[col].dropna()
@@ -113,14 +133,17 @@ class StatisticalEngine:
     
     @staticmethod
     def correlation_matrix(data, method='pearson'):
-        num_data = data.select_dtypes(include=[np.number])
+        num_data = StatisticalEngine._clean_numeric_data(data)
         return num_data.corr(method=method)
     
     @staticmethod
     def vif_analysis(X):
         if not STATSMODELS_AVAILABLE:
             return None
-        X_const = sm.add_constant(X)
+        X_clean = StatisticalEngine._clean_numeric_data(X)
+        if X_clean.empty:
+            return None
+        X_const = sm.add_constant(X_clean)
         vif_data = pd.DataFrame()
         vif_data["feature"] = X_const.columns
         vif_data["VIF"] = [variance_inflation_factor(X_const.values, i) for i in range(X_const.shape[1])]
@@ -128,12 +151,9 @@ class StatisticalEngine:
     
     @staticmethod
     def outlier_detection(data, method='iqr', contamination=0.1):
-        # Sadece sayısal sütunlar
-        num_data = data.select_dtypes(include=[np.number]).copy()
+        num_data = StatisticalEngine._clean_numeric_data(data)
         if num_data.empty:
             return pd.Series([False] * len(data))
-        # NaN'leri medyan ile doldur
-        num_data = num_data.fillna(num_data.median())
         
         if method == 'iqr':
             outliers = pd.DataFrame(index=data.index)
@@ -155,12 +175,9 @@ class StatisticalEngine:
     
     @staticmethod
     def pca_analysis(data, n_components=2, scale=True):
-        # Sadece sayısal sütunlar
-        num_data = data.select_dtypes(include=[np.number]).copy()
+        num_data = StatisticalEngine._clean_numeric_data(data)
         if num_data.empty:
             return np.array([]), np.array([]), None
-        # NaN'leri medyan ile doldur
-        num_data = num_data.fillna(num_data.median())
         
         if scale:
             scaler = StandardScaler()
@@ -169,6 +186,9 @@ class StatisticalEngine:
             num_scaled = num_data.values
         
         n_comp = min(n_components, num_scaled.shape[1])
+        if n_comp < 1:
+            return np.array([]), np.array([]), None
+            
         pca = PCA(n_components=n_comp)
         pcs = pca.fit_transform(num_scaled)
         explained_var = pca.explained_variance_ratio_
@@ -263,12 +283,23 @@ def main():
                     df = pd.read_csv(uploaded_file)
                 else:
                     df = pd.read_excel(uploaded_file, engine='openpyxl')
-                # NaN'leri temizle (tüm sayısal sütunlarda medyan ile doldur)
-                for col in df.columns:
-                    if df[col].dtype in ['int64', 'float64']:
-                        df[col].fillna(df[col].median(), inplace=True)
+                
+                # ---- GELİŞMİŞ NaN TEMİZLEME ----
+                # Sayısal sütunlardaki NaN'leri medyan ile doldur
+                for col in df.select_dtypes(include=[np.number]).columns:
+                    if df[col].isnull().all():
+                        df[col].fillna(0, inplace=True)
                     else:
-                        df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else "Unknown", inplace=True)
+                        df[col].fillna(df[col].median(), inplace=True)
+                
+                # Kategorik sütunlardaki NaN'leri mod ile doldur
+                for col in df.select_dtypes(include=['object', 'category']).columns:
+                    mode_val = df[col].mode()
+                    if not mode_val.empty:
+                        df[col].fillna(mode_val[0], inplace=True)
+                    else:
+                        df[col].fillna("Bilinmiyor", inplace=True)
+                
                 st.session_state.df = df
                 st.success(f"✅ {st.session_state.df.shape[0]} satır, {st.session_state.df.shape[1]} sütun")
             except Exception as e:
@@ -313,9 +344,12 @@ def main():
         with st.expander("📉 Korelasyon Matrisi"):
             corr_method = st.selectbox("Metod", ["pearson", "spearman", "kendall"])
             corr_matrix = StatisticalEngine.correlation_matrix(df, corr_method)
-            fig, ax = plt.subplots(figsize=(10, 8))
-            sns.heatmap(corr_matrix, annot=True, fmt='.2f', cmap='coolwarm', ax=ax)
-            st.pyplot(fig)
+            if not corr_matrix.empty:
+                fig, ax = plt.subplots(figsize=(10, 8))
+                sns.heatmap(corr_matrix, annot=True, fmt='.2f', cmap='coolwarm', ax=ax)
+                st.pyplot(fig)
+            else:
+                st.info("Korelasyon matrisi oluşturmak için yeterli sayısal veri yok.")
         
         with st.expander("🔍 PCA"):
             n_comp = st.slider("Bileşen sayısı", 2, min(10, df.shape[1]-1), 2)
@@ -360,16 +394,28 @@ def main():
                 if col not in numeric_cols and col not in categorical_cols:
                     categorical_cols.append(col)
             
+            # NaN'leri temizle (sayısal sütunlar için medyan, kategorik için mod)
+            for col in numeric_cols:
+                if X[col].isnull().all():
+                    X[col].fillna(0, inplace=True)
+                else:
+                    X[col].fillna(X[col].median(), inplace=True)
+            
+            for col in categorical_cols:
+                mode_val = X[col].mode()
+                if not mode_val.empty:
+                    X[col].fillna(mode_val[0], inplace=True)
+                else:
+                    X[col].fillna("Unknown", inplace=True)
+            
             transformers = []
             if numeric_cols:
                 num_pipe = Pipeline([
-                    ('impute', SimpleImputer(strategy='median')),
                     ('scale', RobustScaler())
                 ])
                 transformers.append(('num', num_pipe, numeric_cols))
             if categorical_cols:
                 cat_pipe = Pipeline([
-                    ('impute', SimpleImputer(strategy='most_frequent')),
                     ('encode', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
                 ])
                 transformers.append(('cat', cat_pipe, categorical_cols))
