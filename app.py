@@ -1,5 +1,5 @@
-pip install openpyxl
-pip install mlflow statsmodels
+!pip install openpyxl
+!pip install mlflow statsmodels
 import streamlit as st
 import pandas as pd
 import numpy as np
