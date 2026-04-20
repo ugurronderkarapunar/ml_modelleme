@@ -65,7 +65,7 @@ if 'df' not in st.session_state:
         'content_cols': []
     })
 
-# ------------------ İSTATİSTİKSEL ANALİZ MOTORU ------------------
+# ------------------ İSTATİSTİKSEL ANALİZ MOTORU (DÜZELTİLMİŞ) ------------------
 class StatisticalEngine:
     @staticmethod
     def normality_test(data, col):
@@ -93,41 +93,83 @@ class StatisticalEngine:
         }
     
     @staticmethod
+    def t_test(data, group_col, value_col):
+        groups = data[group_col].unique()
+        if len(groups) != 2:
+            return None
+        g1 = data[data[group_col] == groups[0]][value_col].dropna()
+        g2 = data[data[group_col] == groups[1]][value_col].dropna()
+        t_stat, p_val = stats.ttest_ind(g1, g2)
+        return {"t_statistic": t_stat, "p-value": p_val, "significant": p_val < 0.05}
+    
+    @staticmethod
+    def anova(data, group_col, value_col):
+        groups = [data[data[group_col] == g][value_col].dropna() for g in data[group_col].unique()]
+        groups = [g for g in groups if len(g) > 1]
+        if len(groups) < 2:
+            return None
+        f_stat, p_val = stats.f_oneway(*groups)
+        return {"F_statistic": f_stat, "p-value": p_val, "significant": p_val < 0.05}
+    
+    @staticmethod
     def correlation_matrix(data, method='pearson'):
         num_data = data.select_dtypes(include=[np.number])
         return num_data.corr(method=method)
     
     @staticmethod
+    def vif_analysis(X):
+        if not STATSMODELS_AVAILABLE:
+            return None
+        X_const = sm.add_constant(X)
+        vif_data = pd.DataFrame()
+        vif_data["feature"] = X_const.columns
+        vif_data["VIF"] = [variance_inflation_factor(X_const.values, i) for i in range(X_const.shape[1])]
+        return vif_data
+    
+    @staticmethod
     def outlier_detection(data, method='iqr', contamination=0.1):
-        num_cols = data.select_dtypes(include=[np.number]).columns
-        if len(num_cols) == 0:
-            return pd.Series([False]*len(data))
+        # SADECE SAYISAL SÜTUNLARI AL
+        num_data = data.select_dtypes(include=[np.number])
+        if num_data.empty:
+            return pd.Series([False] * len(data))
+        
         if method == 'iqr':
             outliers = pd.DataFrame(index=data.index)
-            for col in num_cols:
-                Q1 = data[col].quantile(0.25)
-                Q3 = data[col].quantile(0.75)
+            for col in num_data.columns:
+                Q1 = num_data[col].quantile(0.25)
+                Q3 = num_data[col].quantile(0.75)
                 IQR = Q3 - Q1
-                outliers[col] = (data[col] < (Q1 - 1.5 * IQR)) | (data[col] > (Q3 + 1.5 * IQR))
+                outliers[col] = (num_data[col] < (Q1 - 1.5 * IQR)) | (num_data[col] > (Q3 + 1.5 * IQR))
             return outliers.any(axis=1)
         elif method == 'zscore':
             from scipy.stats import zscore
-            z_scores = np.abs(zscore(data[num_cols].fillna(data[num_cols].median())))
+            # Sadece sayısal sütunların median'ı ile doldur
+            filled = num_data.fillna(num_data.median())
+            z_scores = np.abs(zscore(filled))
             return (z_scores > 3).any(axis=1)
         elif method == 'isolation_forest':
             iso = IsolationForest(contamination=contamination, random_state=42)
-            preds = iso.fit_predict(data[num_cols].fillna(data[num_cols].median()))
+            filled = num_data.fillna(num_data.median())
+            preds = iso.fit_predict(filled)
             return preds == -1
-        return pd.Series([False]*len(data))
+        return pd.Series([False] * len(data))
     
     @staticmethod
     def pca_analysis(data, n_components=2, scale=True):
-        num_data = data.select_dtypes(include=[np.number]).fillna(data.median())
+        # SADECE SAYISAL SÜTUNLARI AL
+        num_data = data.select_dtypes(include=[np.number])
+        if num_data.empty:
+            return np.array([]), np.array([]), None
+        
+        # Sadece sayısal sütunların median'ı ile doldur
+        num_data = num_data.fillna(num_data.median())
+        
         if scale:
             scaler = StandardScaler()
             num_scaled = scaler.fit_transform(num_data)
         else:
             num_scaled = num_data.values
+        
         n_comp = min(n_components, num_scaled.shape[1])
         pca = PCA(n_components=n_comp)
         pcs = pca.fit_transform(num_scaled)
@@ -196,7 +238,7 @@ class HybridRecommender:
         collab_recs = self.recommend_collaborative(user_id, top_k=top_k*2)
         content_recs = []
         if item_id:
-            # Basit demo - içerik benzerliği için gerekli implementasyon eklenebilir
+            # İçerik bazlı öneri (opsiyonel)
             pass
         combined = {}
         for item, score in collab_recs:
@@ -274,10 +316,13 @@ def main():
         with st.expander("🔍 PCA"):
             n_comp = st.slider("Bileşen sayısı", 2, min(10, df.shape[1]-1), 2)
             pcs, var_exp, _ = StatisticalEngine.pca_analysis(df, n_components=n_comp)
-            st.write(f"Açıklanan varyans: {var_exp.cumsum()[-1]:.2%}")
-            fig2, ax2 = plt.subplots()
-            ax2.bar(range(1, len(var_exp)+1), var_exp, alpha=0.7)
-            st.pyplot(fig2)
+            if len(pcs) > 0:
+                st.write(f"Açıklanan varyans: {var_exp.cumsum()[-1]:.2%}")
+                fig2, ax2 = plt.subplots()
+                ax2.bar(range(1, len(var_exp)+1), var_exp, alpha=0.7)
+                st.pyplot(fig2)
+            else:
+                st.info("PCA için yeterli sayısal sütun yok.")
         
         with st.expander("⚠️ Aykırı Değerler"):
             method = st.selectbox("Yöntem", ["iqr", "zscore", "isolation_forest"])
@@ -286,7 +331,7 @@ def main():
             if outliers.sum() > 0:
                 st.dataframe(df[outliers].head())
     
-    # ---------- TAB 2 (DÜZELTİLMİŞ ML MODEL) ----------
+    # ---------- TAB 2 (ML Model) ----------
     with tabs[1]:
         st.header("🤖 AutoML Eğitimi")
         n_est = st.slider("N_estimators", 50, 500, 100)
@@ -296,8 +341,7 @@ def main():
             X = df.drop(columns=[st.session_state.target])
             y = df[st.session_state.target]
             
-            # --- DÜZELTME: Sayısal/kategorik ayrımı güçlendir ---
-            # Önce tüm sütunları deneysel olarak sayısala çevir
+            # Sayısal/kategorik ayrımı güçlendir
             for col in X.columns:
                 if X[col].dtype == 'object':
                     try:
@@ -305,16 +349,14 @@ def main():
                     except:
                         pass
             
-            # Şimdi net ayrım yap
             numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
             categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
             
-            # Eğer hala karışık varsa, kalanları kategorik say
+            # Geriye kalanları kategorik say
             for col in X.columns:
                 if col not in numeric_cols and col not in categorical_cols:
                     categorical_cols.append(col)
             
-            # Pipeline'ları oluştur (boş olma durumunu kontrol et)
             transformers = []
             if numeric_cols:
                 num_pipe = Pipeline([
@@ -330,27 +372,23 @@ def main():
                 transformers.append(('cat', cat_pipe, categorical_cols))
             
             if not transformers:
-                st.error("Hiçbir sütun işlenemedi. Veri tipini kontrol edin.")
+                st.error("Hiçbir sütun işlenemedi.")
                 return
             
             preprocessor = ColumnTransformer(transformers)
             
-            # Model seçimi
             if st.session_state.task == "Classification":
                 model = RandomForestClassifier(n_estimators=n_est, class_weight='balanced', random_state=42)
             else:
                 model = xgb.XGBRegressor(n_estimators=n_est, learning_rate=0.05, random_state=42)
             
             full_pipe = Pipeline([('prep', preprocessor), ('model', model)])
-            
-            # Train-test split
             X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
             
-            with st.spinner("Model eğitiliyor..."):
+            with st.spinner("Eğitiliyor..."):
                 full_pipe.fit(X_train, y_train)
                 st.session_state.model = full_pipe
             
-            # Metrikler
             y_pred = full_pipe.predict(X_test)
             if st.session_state.task == "Classification":
                 st.text(classification_report(y_test, y_pred))
@@ -368,8 +406,7 @@ def main():
             try:
                 if hasattr(full_pipe.named_steps['model'], 'feature_importances_'):
                     importances = full_pipe.named_steps['model'].feature_importances_
-                    # OHE sütun isimlerini al
-                    if categorical_cols:
+                    if categorical_cols and 'cat' in full_pipe.named_steps['prep'].named_transformers_:
                         ohe = full_pipe.named_steps['prep'].named_transformers_['cat'].named_steps['encode']
                         ohe_cols = ohe.get_feature_names_out(categorical_cols)
                         all_features = numeric_cols + list(ohe_cols)
@@ -378,10 +415,9 @@ def main():
                     feat_imp = pd.Series(importances[:len(all_features)], index=all_features).sort_values(ascending=False).head(10)
                     st.subheader("🔑 En Önemli Değişkenler")
                     st.bar_chart(feat_imp)
-            except Exception as e:
-                st.info("Öznitelik önemi gösterilemedi.")
+            except Exception:
+                pass
             
-            # Model indir
             model_bytes = pickle.dumps(full_pipe)
             st.download_button("💾 Modeli İndir (.pkl)", data=model_bytes, file_name="model.pkl")
     
@@ -420,7 +456,7 @@ def main():
                 else:
                     st.info("Öneri yok.")
     
-    # ---------- TAB 4 ----------
+    # ---------- TAB 4 (Production) ----------
     with tabs[3]:
         st.header("🏭 Production Özellikleri")
         if st.session_state.model:
