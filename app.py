@@ -11,7 +11,76 @@ warnings.filterwarnings('ignore')
 
 # Sayfa yapılandırması
 st.set_page_config(page_title="Smart Budget AI", layout="wide", page_icon="💰")
-
+# Gelişmiş CSS - app.py'nin en başına (st.set_page_config'ten sonra)
+st.markdown("""
+<style>
+    /* Ana arka plan */
+    .stApp {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+    /* Ana container */
+    .main .block-container {
+        background: rgba(255,255,255,0.95);
+        border-radius: 30px;
+        padding: 2rem;
+        margin-top: 1rem;
+        box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+        backdrop-filter: blur(10px);
+    }
+    /* Kartlar */
+    .custom-card {
+        background: white;
+        border-radius: 20px;
+        padding: 1.5rem;
+        box-shadow: 0 8px 20px rgba(0,0,0,0.05);
+        transition: transform 0.3s ease;
+        margin-bottom: 1rem;
+    }
+    .custom-card:hover {
+        transform: translateY(-5px);
+    }
+    /* Metrik kartları */
+    .metric-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border-radius: 20px;
+        padding: 1rem;
+        text-align: center;
+    }
+    /* Butonlar */
+    .stButton > button {
+        background: linear-gradient(90deg, #667eea, #764ba2);
+        color: white;
+        border: none;
+        border-radius: 40px;
+        padding: 0.5rem 2rem;
+        font-weight: bold;
+        transition: all 0.3s;
+    }
+    .stButton > button:hover {
+        transform: scale(1.02);
+        box-shadow: 0 10px 20px rgba(0,0,0,0.2);
+    }
+    /* Progress bar özelleştirme */
+    .stProgress > div > div > div > div {
+        background: linear-gradient(90deg, #4CAF50, #FFC107, #F44336);
+        border-radius: 20px;
+    }
+    /* Başlık */
+    h1, h2, h3 {
+        font-family: 'Segoe UI', sans-serif;
+        font-weight: 700;
+        background: linear-gradient(90deg, #667eea, #764ba2);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+    /* Sidebar */
+    .css-1d391kg {
+        background: rgba(0,0,0,0.1);
+        backdrop-filter: blur(10px);
+    }
+</style>
+""", unsafe_allow_html=True)
 # Başlık
 st.title("💰 Smart Budget AI")
 st.markdown("**Proaktif • AI Destekli • Minimalist**")
