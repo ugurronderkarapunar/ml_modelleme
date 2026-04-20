@@ -2,7 +2,6 @@ streamlit
 pandas
 numpy
 matplotlib
-seaborn
-openpyxl
-scipy
 plotly
+scikit-learn
+prophet
