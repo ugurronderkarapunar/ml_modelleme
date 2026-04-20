@@ -12,7 +12,9 @@ from sklearn.preprocessing import RobustScaler, OneHotEncoder, PolynomialFeature
 from sklearn.impute import SimpleImputer
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, StackingClassifier, StackingRegressor
+from sklearn.ensemble import (RandomForestClassifier, RandomForestRegressor,
+                              GradientBoostingClassifier, GradientBoostingRegressor,
+                              StackingClassifier, StackingRegressor)
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.metrics import accuracy_score, r2_score
@@ -22,7 +24,7 @@ import shap
 warnings.filterwarnings('ignore')
 st.set_page_config(page_title="AutoML Studio", layout="wide")
 
-# ------------------ Yardımcı fonksiyonlar ------------------
+# ------------------ 1. Yardımcı fonksiyonlar ------------------
 def handle_missing_values(df, num_strategy='median', cat_strategy='most_frequent'):
     df_out = df.copy()
     num_cols = df_out.select_dtypes(include=[np.number]).columns
@@ -66,7 +68,7 @@ def safe_boxplot(data, x_col, y_col, ax):
     plot_data = plot_data[plot_data[x_col].isin(valid_groups)]
     sns.boxplot(data=plot_data, x=x_col, y=y_col, ax=ax)
 
-# ------------------ Session state ------------------
+# ------------------ 2. Session state ------------------
 if 'df' not in st.session_state:
     st.session_state.df = None
 if 'target' not in st.session_state:
@@ -83,7 +85,7 @@ if 'X_columns' not in st.session_state:
 st.title("🧠 Senior Full Stack Data Science Studio")
 st.markdown("**Adım Adım: Veri Yükleme → EDA → Problem Tanımı → Ön İşleme → Modelleme → Ensemble → Yorumlama**")
 
-# ------------------ 1. VERİ YÜKLEME ------------------
+# ------------------ 3. VERİ YÜKLEME ------------------
 st.header("1️⃣ Veri Yükleme")
 uploaded_file = st.file_uploader("CSV veya Excel dosyası seçin", type=['csv', 'xlsx'])
 if uploaded_file:
@@ -109,7 +111,7 @@ if st.session_state.df is None:
     st.stop()
 df = st.session_state.df
 
-# ------------------ 2. GENEL EDA ------------------
+# ------------------ 4. GENEL EDA ------------------
 st.header("2️⃣ Genel Keşifsel Veri Analizi (EDA)")
 col_sel = st.selectbox("Değişken seçin", df.columns)
 if df[col_sel].dtype in ['int64', 'float64']:
@@ -131,7 +133,7 @@ if not num_df.empty:
     sns.heatmap(num_df.corr(), annot=True, fmt='.2f', cmap='coolwarm', ax=ax)
     st.pyplot(fig)
 
-# ------------------ 3. PROBLEM TANIMI ------------------
+# ------------------ 5. PROBLEM TANIMI ------------------
 st.header("3️⃣ Problem Tanımı")
 problem_type = st.radio("Problem tipi", ["Sınıflandırma", "Regresyon", "Kümeleme", "Öneri Sistemi"])
 target = st.selectbox("Hedef Değişken (Y)", df.columns)
@@ -142,7 +144,7 @@ st.session_state.target = target
 st.session_state.problem_type = problem_type
 st.session_state.X_columns = X.columns.tolist()
 
-# ------------------ 4. VERİ ÖN İŞLEME ------------------
+# ------------------ 6. VERİ ÖN İŞLEME ------------------
 st.header("4️⃣ Veri Ön İşleme")
 # Tip dönüşümü
 for col in X.columns:
@@ -156,7 +158,7 @@ categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolis
 st.write(f"**Sayısal ({len(numeric_cols)}):** {numeric_cols}")
 st.write(f"**Kategorik ({len(categorical_cols)}):** {categorical_cols}")
 
-# Eksik veri
+# Eksik veri analizi
 missing = X.isnull().sum()
 missing = missing[missing > 0]
 if not missing.empty:
@@ -167,7 +169,7 @@ else:
     num_strategy, cat_strategy = "median", "most_frequent"
     st.success("Eksik veri yok!")
 
-# Aykırı değer
+# Aykırı değer temizleme
 if st.checkbox("Aykırı değer temizle (IQR)"):
     original_len = len(X)
     outlier_mask = pd.Series([False]*len(X), index=X.index)
@@ -177,7 +179,7 @@ if st.checkbox("Aykırı değer temizle (IQR)"):
     y = y[~outlier_mask]
     st.success(f"Aykırı değerler temizlendi: {original_len} → {len(X)}")
 
-# Eksik değerleri doldur
+# Eksik değer doldurma
 X = handle_missing_values(X, num_strategy, cat_strategy)
 st.success("Eksik değerler dolduruldu.")
 
@@ -191,14 +193,14 @@ if st.checkbox("Polinomik özellikler ekle (derece 2)"):
         st.success(f"Yeni özellik sayısı: {X.shape[1]}")
         numeric_cols = list(new_cols)  # güncelle
 
-# ------------------ 5. TRAIN-TEST SPLIT ------------------
+# ------------------ 7. TRAIN-TEST SPLIT ------------------
 st.header("5️⃣ Train-Test Split")
 test_size = st.slider("Test oranı (%)", 10, 40, 20) / 100
 cv_folds = st.slider("Cross-validation kat sayısı", 3, 10, 5)
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
 st.write(f"**Eğitim:** {X_train.shape[0]} | **Test:** {X_test.shape[0]}")
 
-# ------------------ 6. MODEL PIPELINE & KARŞILAŞTIRMA ------------------
+# ------------------ 8. MODEL PIPELINE & KARŞILAŞTIRMA ------------------
 st.header("6️⃣ Model Pipeline & Karşılaştırma")
 num_transformer = Pipeline([('scaler', RobustScaler())])
 cat_transformer = Pipeline([('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))])
@@ -241,7 +243,7 @@ if models and st.button("Model Karşılaştırmasını Başlat"):
         prog.progress((i+1)/len(models))
     st.dataframe(pd.DataFrame(results))
 
-# ------------------ 7. HİPERPARAMETRE TUNING ------------------
+# ------------------ 9. HİPERPARAMETRE TUNING ------------------
 st.header("7️⃣ Hiperparametre Tuning")
 if models:
     selected_model = st.selectbox("Tuning yapılacak model", list(models.keys()))
@@ -265,7 +267,7 @@ if models:
         else:
             st.info("Bu model için ön tanımlı parametre yok.")
 
-# ------------------ 8. STACKING ENSEMBLE ------------------
+# ------------------ 10. STACKING ENSEMBLE ------------------
 st.header("8️⃣ Stacking Ensemble")
 if problem_type in ["Sınıflandırma", "Regresyon"] and st.button("Stacking Modeli Oluştur"):
     if problem_type == "Sınıflandırma":
@@ -284,7 +286,7 @@ if problem_type in ["Sınıflandırma", "Regresyon"] and st.button("Stacking Mod
     if st.session_state.best_model is None:
         st.session_state.best_model = pipe_stack
 
-# ------------------ 9. MODEL YORUMLAMA (SHAP) ------------------
+# ------------------ 11. MODEL YORUMLAMA (SHAP) ------------------
 st.header("9️⃣ Model Yorumlama (SHAP)")
 if st.session_state.best_model is not None:
     try:
@@ -305,7 +307,7 @@ if st.session_state.best_model is not None:
 else:
     st.info("Önce bir model eğitin (GridSearch veya Stacking).")
 
-# ------------------ 10. YENİ VERİ İLE TAHMİN ------------------
+# ------------------ 12. YENİ VERİ İLE TAHMİN ------------------
 st.header("🔟 Yeni Veri ile Tahmin")
 if st.session_state.best_model is not None:
     option = st.radio("Giriş tipi", ["Manuel", "CSV yükle"])
