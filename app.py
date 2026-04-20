@@ -3,536 +3,693 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-import io
 import pickle
-import json
+import io
 from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
-# Temel bilimsel kütüphaneler
+# Bilimsel ve makine öğrenmesi
 from scipy import stats
-from scipy.spatial.distance import cosine, euclidean
-
-# Makine öğrenmesi
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.preprocessing import StandardScaler, RobustScaler, OneHotEncoder, LabelEncoder
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, StratifiedKFold, KFold
+from sklearn.preprocessing import StandardScaler, RobustScaler, MinMaxScaler, OneHotEncoder, LabelEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, IsolationForest
-from sklearn.metrics import (classification_report, confusion_matrix, r2_score,
-                             mean_absolute_percentage_error, silhouette_score)
+from sklearn.metrics import (accuracy_score, f1_score, precision_score, recall_score, roc_auc_score,
+                             classification_report, confusion_matrix, r2_score, mean_absolute_error,
+                             mean_squared_error, mean_absolute_percentage_error, silhouette_score)
+from sklearn.ensemble import (RandomForestClassifier, RandomForestRegressor,
+                              GradientBoostingClassifier, GradientBoostingRegressor,
+                              VotingClassifier, VotingRegressor, StackingClassifier, StackingRegressor)
+from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+from sklearn.svm import SVC, SVR
+from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
 from sklearn.decomposition import PCA
-from sklearn.cluster import KMeans, DBSCAN
-from sklearn.neighbors import NearestNeighbors
-from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.feature_selection import SelectKBest, f_classif, f_regression, mutual_info_classif, mutual_info_regression
 
 import xgboost as xgb
+import lightgbm as lgb
+import catboost as cb
 
-# Öneri sistemleri için
+# Öneri sistemleri
+from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.decomposition import TruncatedSVD
 
-# ---------- OPSIYONEL KÜTÜPHANELER ----------
-try:
-    import statsmodels.api as sm
-    from statsmodels.tsa.arima.model import ARIMA
-    from statsmodels.tsa.stattools import adfuller
-    from statsmodels.stats.outliers_influence import variance_inflation_factor
-    STATSMODELS_AVAILABLE = True
-except ImportError:
-    STATSMODELS_AVAILABLE = False
+# Gelişmiş görselleştirme
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-try:
-    import mlflow
-    import mlflow.sklearn
-    MLFLOW_AVAILABLE = True
-except ImportError:
-    MLFLOW_AVAILABLE = False
+# Konfigürasyon
+st.set_page_config(page_title="Senior Full-Stack Data Science Studio", layout="wide", page_icon="🧠")
 
-# ------------------ KONFİGÜRASYON ------------------
-st.set_page_config(page_title="PhD-Level Analytics & RecSys", layout="wide", page_icon="🧠")
-
-# Session state
-if 'df' not in st.session_state:
+# Session state başlangıcı
+if 'step' not in st.session_state:
     st.session_state.update({
+        'step': 1,  # 1: Veri Yükleme, 2: Genel EDA, 3: Problem Tanımı, 4: Hedef & Gereksiz Değişkenler, 5: Detaylı Preprocessing, 6: Train/Test Split, 7: Pipeline Konfigürasyonu, 8: Model Karşılaştırma, 9: Hiperparametre Tuning, 10: Cross Validation, 11: Stacking/Ensemble, 12: Model Yorumlama
         'df': None,
-        'model': None,
+        'df_original': None,
         'target': None,
-        'task': 'Classification',
-        'recommender': None,
-        'rec_type': 'content',
-        'content_cols': []
+        'problem_type': None,  # 'classification', 'regression', 'recommendation', 'clustering'
+        'exclude_cols': [],
+        'numeric_cols': [],
+        'categorical_cols': [],
+        'preprocessing_config': {},
+        'X_train': None, 'X_test': None, 'y_train': None, 'y_test': None,
+        'models': {},
+        'best_model': None,
+        'best_params': {},
+        'cv_results': {},
+        'stacking_model': None,
+        'feature_importance': None,
+        'test_size': 0.2,
+        'random_state': 42
     })
 
-# ------------------ İSTATİSTİKSEL ANALİZ MOTORU (GELİŞMİŞ NaN YÖNETİMİ) ------------------
-class StatisticalEngine:
-    @staticmethod
-    def _clean_numeric_data(data):
-        """Sayısal verileri NaN'lere karşı temizler, tamamen boş sütunları kaldırır."""
-        num_data = data.select_dtypes(include=[np.number]).copy()
-        if num_data.empty:
-            return num_data
-        
-        # Tamamen boş sütunları kaldır
-        num_data = num_data.dropna(axis=1, how='all')
-        
-        # Kalan sütunlardaki NaN'leri medyan ile doldur
-        for col in num_data.columns:
-            if num_data[col].isnull().all():
-                # Eğer hala tamamen boşsa, 0 ile doldur
-                num_data[col].fillna(0, inplace=True)
-            else:
-                num_data[col].fillna(num_data[col].median(), inplace=True)
-        
-        return num_data
+# Yardımcı fonksiyonlar
+def load_data(file):
+    if file.name.endswith('.csv'):
+        df = pd.read_csv(file)
+    else:
+        df = pd.read_excel(file, engine='openpyxl')
+    return df
 
-    @staticmethod
-    def normality_test(data, col):
-        ser = data[col].dropna()
-        if len(ser) < 3:
-            return None
-        shapiro = stats.shapiro(ser)
-        dagostino = stats.normaltest(ser) if len(ser) >= 20 else (None, None)
-        return {
-            "Shapiro-Wilk": {"statistic": shapiro[0], "p-value": shapiro[1], "normal": shapiro[1] > 0.05},
-            "D'Agostino-Pearson": {"statistic": dagostino[0], "p-value": dagostino[1], "normal": dagostino[1] > 0.05} if dagostino[0] else None
-        }
-    
-    @staticmethod
-    def homogeneity_test(data, group_col, value_col):
-        groups = [data[data[group_col] == g][value_col].dropna() for g in data[group_col].unique()]
-        groups = [g for g in groups if len(g) > 1]
-        if len(groups) < 2:
-            return None
-        levene = stats.levene(*groups)
-        bartlett = stats.bartlett(*groups) if all(len(g) > 0 for g in groups) else (None, None)
-        return {
-            "Levene": {"statistic": levene[0], "p-value": levene[1], "homogeneous": levene[1] > 0.05},
-            "Bartlett": {"statistic": bartlett[0], "p-value": bartlett[1], "homogeneous": bartlett[1] > 0.05} if bartlett[0] else None
-        }
-    
-    @staticmethod
-    def t_test(data, group_col, value_col):
-        groups = data[group_col].unique()
-        if len(groups) != 2:
-            return None
-        g1 = data[data[group_col] == groups[0]][value_col].dropna()
-        g2 = data[data[group_col] == groups[1]][value_col].dropna()
-        t_stat, p_val = stats.ttest_ind(g1, g2)
-        return {"t_statistic": t_stat, "p-value": p_val, "significant": p_val < 0.05}
-    
-    @staticmethod
-    def anova(data, group_col, value_col):
-        groups = [data[data[group_col] == g][value_col].dropna() for g in data[group_col].unique()]
-        groups = [g for g in groups if len(g) > 1]
-        if len(groups) < 2:
-            return None
-        f_stat, p_val = stats.f_oneway(*groups)
-        return {"F_statistic": f_stat, "p-value": p_val, "significant": p_val < 0.05}
-    
-    @staticmethod
-    def correlation_matrix(data, method='pearson'):
-        num_data = StatisticalEngine._clean_numeric_data(data)
-        return num_data.corr(method=method)
-    
-    @staticmethod
-    def vif_analysis(X):
-        if not STATSMODELS_AVAILABLE:
-            return None
-        X_clean = StatisticalEngine._clean_numeric_data(X)
-        if X_clean.empty:
-            return None
-        X_const = sm.add_constant(X_clean)
-        vif_data = pd.DataFrame()
-        vif_data["feature"] = X_const.columns
-        vif_data["VIF"] = [variance_inflation_factor(X_const.values, i) for i in range(X_const.shape[1])]
-        return vif_data
-    
-    @staticmethod
-    def outlier_detection(data, method='iqr', contamination=0.1):
-        num_data = StatisticalEngine._clean_numeric_data(data)
-        if num_data.empty:
-            return pd.Series([False] * len(data))
-        
-        if method == 'iqr':
-            outliers = pd.DataFrame(index=data.index)
-            for col in num_data.columns:
-                Q1 = num_data[col].quantile(0.25)
-                Q3 = num_data[col].quantile(0.75)
-                IQR = Q3 - Q1
-                outliers[col] = (num_data[col] < (Q1 - 1.5 * IQR)) | (num_data[col] > (Q3 + 1.5 * IQR))
-            return outliers.any(axis=1)
-        elif method == 'zscore':
-            from scipy.stats import zscore
-            z_scores = np.abs(zscore(num_data))
-            return (z_scores > 3).any(axis=1)
-        elif method == 'isolation_forest':
-            iso = IsolationForest(contamination=contamination, random_state=42)
-            preds = iso.fit_predict(num_data)
-            return preds == -1
-        return pd.Series([False] * len(data))
-    
-    @staticmethod
-    def pca_analysis(data, n_components=2, scale=True):
-        num_data = StatisticalEngine._clean_numeric_data(data)
-        if num_data.empty:
-            return np.array([]), np.array([]), None
-        
-        if scale:
-            scaler = StandardScaler()
-            num_scaled = scaler.fit_transform(num_data)
-        else:
-            num_scaled = num_data.values
-        
-        n_comp = min(n_components, num_scaled.shape[1])
-        if n_comp < 1:
-            return np.array([]), np.array([]), None
-            
-        pca = PCA(n_components=n_comp)
-        pcs = pca.fit_transform(num_scaled)
-        explained_var = pca.explained_variance_ratio_
-        return pcs, explained_var, pca
+def show_first_rows(df):
+    st.subheader("Veri Setinin İlk 10 Gözlemi")
+    st.dataframe(df.head(10))
 
-# ------------------ HİBRİT ÖNERİ SİSTEMİ ------------------
-class HybridRecommender:
-    def __init__(self, content_columns=None, user_col='user_id', item_col='item_id', rating_col='rating'):
-        self.content_columns = content_columns if content_columns else []
-        self.user_col = user_col
-        self.item_col = item_col
-        self.rating_col = rating_col
-        self.content_sim_matrix = None
-        self.user_factors = None
-        self.item_factors = None
-        self.user_encoder = None
-        self.item_encoder = None
-        self.is_fitted = False
-    
-    def fit_content(self, df_items):
-        if len(self.content_columns) == 0:
-            return
-        features = df_items[self.content_columns].copy()
-        cat_cols = features.select_dtypes(include=['object', 'category']).columns
-        for col in cat_cols:
-            features[col] = LabelEncoder().fit_transform(features[col].astype(str))
-        features = features.fillna(features.median())
-        scaler = StandardScaler()
-        feature_matrix = scaler.fit_transform(features)
-        self.content_sim_matrix = cosine_similarity(feature_matrix)
-    
-    def fit_collaborative(self, df_ratings, n_factors=20):
-        if df_ratings.empty:
-            return
-        self.user_encoder = {uid: i for i, uid in enumerate(df_ratings[self.user_col].unique())}
-        self.item_encoder = {iid: i for i, iid in enumerate(df_ratings[self.item_col].unique())}
-        n_users = len(self.user_encoder)
-        n_items = len(self.item_encoder)
-        matrix = np.zeros((n_users, n_items))
-        for _, row in df_ratings.iterrows():
-            u = self.user_encoder[row[self.user_col]]
-            i = self.item_encoder[row[self.item_col]]
-            matrix[u, i] = row[self.rating_col]
-        n_comp = min(n_factors, n_users-1, n_items-1)
-        if n_comp < 1:
-            return
-        svd = TruncatedSVD(n_components=n_comp)
-        self.user_factors = svd.fit_transform(matrix)
-        self.item_factors = svd.components_.T
-        self.is_fitted = True
-    
-    def recommend_collaborative(self, user_id, top_k=5):
-        if not self.is_fitted or self.user_factors is None:
-            return []
-        u = self.user_encoder.get(user_id, None)
-        if u is None:
-            return []
-        user_vec = self.user_factors[u]
-        predictions = np.dot(self.item_factors, user_vec)
-        top_items = np.argsort(predictions)[-top_k:][::-1]
-        inv_item_encoder = {v: k for k, v in self.item_encoder.items()}
-        return [(inv_item_encoder[i], predictions[i]) for i in top_items if i in inv_item_encoder]
-    
-    def hybrid_recommend(self, user_id, item_id=None, alpha=0.5, top_k=5):
-        collab_recs = self.recommend_collaborative(user_id, top_k=top_k*2)
-        content_recs = []
-        if item_id:
-            pass
-        combined = {}
-        for item, score in collab_recs:
-            combined[item] = combined.get(item, 0) + alpha * score
-        sorted_recs = sorted(combined.items(), key=lambda x: x[1], reverse=True)[:top_k]
-        return sorted_recs
+def detect_problem_type(target_col):
+    unique_vals = target_col.nunique()
+    if unique_vals < 20 or target_col.dtype == 'object' or target_col.dtype == 'category':
+        return 'classification'
+    else:
+        return 'regression'
+
+def split_data(X, y, test_size, random_state):
+    return train_test_split(X, y, test_size=test_size, random_state=random_state, stratify=y if st.session_state.problem_type == 'classification' else None)
+
+def get_model_list(problem_type):
+    if problem_type == 'classification':
+        return {
+            'Lojistik Regresyon': LogisticRegression(max_iter=1000),
+            'Karar Ağacı': DecisionTreeClassifier(),
+            'Random Forest': RandomForestClassifier(),
+            'XGBoost': xgb.XGBClassifier(),
+            'LightGBM': lgb.LGBMClassifier(),
+            'CatBoost': cb.CatBoostClassifier(verbose=0),
+            'SVM': SVC(probability=True)
+        }
+    elif problem_type == 'regression':
+        return {
+            'Lineer Regresyon': LinearRegression(),
+            'Karar Ağacı': DecisionTreeRegressor(),
+            'Random Forest': RandomForestRegressor(),
+            'XGBoost': xgb.XGBRegressor(),
+            'LightGBM': lgb.LGBMRegressor(),
+            'CatBoost': cb.CatBoostRegressor(verbose=0),
+            'SVR': SVR()
+        }
+    elif problem_type == 'clustering':
+        return {
+            'K-Means': KMeans(),
+            'DBSCAN': DBSCAN(),
+            'Hiyerarşik': AgglomerativeClustering()
+        }
+    else:  # recommendation
+        return {}
+
+def get_param_grid(model_name, problem_type):
+    # Her model için örnek parametre grid'leri (kullanıcı seçebilir)
+    grids = {
+        'Random Forest': {'n_estimators': [50, 100, 200], 'max_depth': [None, 10, 20]},
+        'XGBoost': {'n_estimators': [50, 100], 'learning_rate': [0.01, 0.1], 'max_depth': [3, 5]},
+        'LightGBM': {'n_estimators': [50, 100], 'learning_rate': [0.01, 0.1], 'num_leaves': [31, 50]},
+        'CatBoost': {'iterations': [50, 100], 'learning_rate': [0.01, 0.1], 'depth': [3, 6]},
+        'SVM': {'C': [0.1, 1, 10], 'gamma': ['scale', 'auto']},
+        'Lojistik Regresyon': {'C': [0.1, 1, 10]},
+        'Karar Ağacı': {'max_depth': [3, 5, 10], 'min_samples_split': [2, 5, 10]},
+        'Lineer Regresyon': {},
+        'SVR': {'C': [0.1, 1, 10], 'epsilon': [0.01, 0.1]}
+    }
+    return grids.get(model_name, {})
+
+def evaluate_classification(model, X_test, y_test):
+    y_pred = model.predict(X_test)
+    y_proba = model.predict_proba(X_test) if hasattr(model, "predict_proba") else None
+    acc = accuracy_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred, average='weighted')
+    prec = precision_score(y_test, y_pred, average='weighted')
+    rec = recall_score(y_test, y_pred, average='weighted')
+    auc = roc_auc_score(y_test, y_proba, multi_class='ovr') if y_proba is not None and len(np.unique(y_test)) > 2 else None
+    return {'Accuracy': acc, 'F1-Score': f1, 'Precision': prec, 'Recall': rec, 'AUC': auc}
+
+def evaluate_regression(model, X_test, y_test):
+    y_pred = model.predict(X_test)
+    r2 = r2_score(y_test, y_pred)
+    mae = mean_absolute_error(y_test, y_pred)
+    mse = mean_squared_error(y_test, y_pred)
+    rmse = np.sqrt(mse)
+    mape = mean_absolute_percentage_error(y_test, y_pred)
+    return {'R2': r2, 'MAE': mae, 'MSE': mse, 'RMSE': rmse, 'MAPE': mape}
+
+def evaluate_clustering(model, X):
+    if hasattr(model, 'labels_'):
+        labels = model.labels_
+    else:
+        labels = model.fit_predict(X)
+    if len(set(labels)) > 1:
+        sil = silhouette_score(X, labels)
+    else:
+        sil = -1
+    return {'Silhouette Score': sil, 'N_clusters': len(set(labels)) - (1 if -1 in labels else 0)}
 
 # ------------------ ANA UYGULAMA ------------------
 def main():
-    st.title("🧠 PhD-Level Analytics & Recommendation System")
-    st.markdown("İstatistiksel testler, makine öğrenmesi, production-grade öneri sistemi")
-    
-    if not STATSMODELS_AVAILABLE:
-        st.info("📌 Not: 'statsmodels' yüklü değil. Bazı analizler devre dışı.")
-    if not MLFLOW_AVAILABLE:
-        st.info("📌 Not: 'mlflow' yüklü değil. Model loglama devre dışı.")
-    
-    # Sidebar
+    st.title("🧠 Senior Full-Stack Data Science Studio")
+    st.markdown("Otomatik makine öğrenmesi pipeline'ı, veri sızıntısı olmadan, ölçeklenebilir ve güvenilir.")
+
+    # Sidebar'da adım takibi
     with st.sidebar:
-        st.header("📂 Veri Yükleme")
-        uploaded_file = st.file_uploader("CSV veya Excel", type=['csv', 'xlsx'])
+        st.subheader("Adımlar")
+        step_names = {
+            1: "1. Veri Yükleme & İlk Bakış",
+            2: "2. Genel EDA",
+            3: "3. Problem Tanımı",
+            4: "4. Hedef & Gereksiz Değişkenler",
+            5: "5. Detaylı Preprocessing",
+            6: "6. Train/Test Split",
+            7: "7. Pipeline Konfigürasyonu",
+            8: "8. Model Karşılaştırma",
+            9: "9. Hiperparametre Tuning",
+            10: "10. Cross Validation",
+            11: "11. Stacking & Ensemble",
+            12: "12. Model Yorumlama"
+        }
+        for step_num, step_name in step_names.items():
+            if st.session_state.step == step_num:
+                st.markdown(f"**→ {step_name}**")
+            else:
+                st.markdown(step_name)
+        st.divider()
+        if st.button("🔄 Sıfırla"):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
+
+    # Adım 1: Veri Yükleme & İlk Bakış
+    if st.session_state.step == 1:
+        st.header("📂 Veri Yükleme & İlk Bakış")
+        uploaded_file = st.file_uploader("CSV veya Excel dosyası seçin", type=['csv', 'xlsx'])
         if uploaded_file:
-            try:
-                if uploaded_file.name.endswith('.csv'):
-                    df = pd.read_csv(uploaded_file)
-                else:
-                    df = pd.read_excel(uploaded_file, engine='openpyxl')
-                
-                # ---- GELİŞMİŞ NaN TEMİZLEME ----
-                # Sayısal sütunlardaki NaN'leri medyan ile doldur
-                for col in df.select_dtypes(include=[np.number]).columns:
-                    if df[col].isnull().all():
-                        df[col].fillna(0, inplace=True)
-                    else:
-                        df[col].fillna(df[col].median(), inplace=True)
-                
-                # Kategorik sütunlardaki NaN'leri mod ile doldur
-                for col in df.select_dtypes(include=['object', 'category']).columns:
-                    mode_val = df[col].mode()
-                    if not mode_val.empty:
-                        df[col].fillna(mode_val[0], inplace=True)
-                    else:
-                        df[col].fillna("Bilinmiyor", inplace=True)
-                
-                st.session_state.df = df
-                st.success(f"✅ {st.session_state.df.shape[0]} satır, {st.session_state.df.shape[1]} sütun")
-            except Exception as e:
-                st.error(f"Hata: {e}")
-        
-        if st.session_state.df is not None:
-            st.divider()
-            st.session_state.target = st.selectbox("🎯 Hedef Değişken", st.session_state.df.columns)
-            st.session_state.task = st.radio("Görev Tipi", ["Classification", "Regression"])
-            
-            st.divider()
-            st.subheader("🎯 Öneri Sistemi")
-            st.session_state.rec_type = st.selectbox("Öneri Tipi", ["İçerik Tabanlı", "İşbirlikçi", "Hibrit"])
-            if st.session_state.rec_type != "İşbirlikçi":
-                content_cols = st.multiselect("İçerik özellik sütunları", st.session_state.df.columns)
-                st.session_state.content_cols = content_cols
-    
-    if st.session_state.df is None:
-        st.info("Lütfen bir veri seti yükleyin.")
-        return
-    
-    df = st.session_state.df
-    tabs = st.tabs(["📊 İstatistiksel Analiz", "🤖 ML Model", "🎯 Öneri Sistemi", "🏭 Production"])
-    
-    # ---------- TAB 1 ----------
-    with tabs[0]:
-        st.subheader("🔬 İleri İstatistiksel Analiz")
-        col_sel = st.selectbox("Analiz edilecek sütun", df.columns)
-        
-        with st.expander("📈 Normallik Testleri"):
-            norm_res = StatisticalEngine.normality_test(df, col_sel)
-            if norm_res:
-                st.json(norm_res)
-        
-        if len(df.select_dtypes(include=['object']).columns) > 0:
-            with st.expander("📊 Varyans Homojenliği"):
-                group_col = st.selectbox("Grup sütunu", df.select_dtypes(include=['object']).columns)
-                homo_res = StatisticalEngine.homogeneity_test(df, group_col, col_sel)
-                if homo_res:
-                    st.json(homo_res)
-        
-        with st.expander("📉 Korelasyon Matrisi"):
-            corr_method = st.selectbox("Metod", ["pearson", "spearman", "kendall"])
-            corr_matrix = StatisticalEngine.correlation_matrix(df, corr_method)
-            if not corr_matrix.empty:
-                fig, ax = plt.subplots(figsize=(10, 8))
-                sns.heatmap(corr_matrix, annot=True, fmt='.2f', cmap='coolwarm', ax=ax)
-                st.pyplot(fig)
-            else:
-                st.info("Korelasyon matrisi oluşturmak için yeterli sayısal veri yok.")
-        
-        with st.expander("🔍 PCA"):
-            n_comp = st.slider("Bileşen sayısı", 2, min(10, df.shape[1]-1), 2)
-            pcs, var_exp, _ = StatisticalEngine.pca_analysis(df, n_components=n_comp)
-            if len(pcs) > 0:
-                st.write(f"Açıklanan varyans: {var_exp.cumsum()[-1]:.2%}")
-                fig2, ax2 = plt.subplots()
-                ax2.bar(range(1, len(var_exp)+1), var_exp, alpha=0.7)
-                st.pyplot(fig2)
-            else:
-                st.info("PCA için yeterli sayısal sütun yok.")
-        
-        with st.expander("⚠️ Aykırı Değerler"):
-            method = st.selectbox("Yöntem", ["iqr", "zscore", "isolation_forest"])
-            outliers = StatisticalEngine.outlier_detection(df, method=method)
-            st.write(f"Aykırı değer sayısı: {outliers.sum()} / {len(df)}")
-            if outliers.sum() > 0:
-                st.dataframe(df[outliers].head())
-    
-    # ---------- TAB 2 ----------
-    with tabs[1]:
-        st.header("🤖 AutoML Eğitimi")
-        n_est = st.slider("N_estimators", 50, 500, 100)
-        test_size = st.slider("Test oranı", 0.1, 0.4, 0.2)
-        
-        if st.button("🚀 Modeli Eğit"):
-            X = df.drop(columns=[st.session_state.target])
-            y = df[st.session_state.target]
-            
-            # Sayısal/kategorik ayrımı
-            for col in X.columns:
-                if X[col].dtype == 'object':
-                    try:
-                        X[col] = pd.to_numeric(X[col], errors='coerce')
-                    except:
-                        pass
-            
-            numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
-            categorical_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
-            
-            for col in X.columns:
-                if col not in numeric_cols and col not in categorical_cols:
-                    categorical_cols.append(col)
-            
-            # NaN'leri temizle (sayısal sütunlar için medyan, kategorik için mod)
-            for col in numeric_cols:
-                if X[col].isnull().all():
-                    X[col].fillna(0, inplace=True)
-                else:
-                    X[col].fillna(X[col].median(), inplace=True)
-            
-            for col in categorical_cols:
-                mode_val = X[col].mode()
-                if not mode_val.empty:
-                    X[col].fillna(mode_val[0], inplace=True)
-                else:
-                    X[col].fillna("Unknown", inplace=True)
-            
-            transformers = []
-            if numeric_cols:
-                num_pipe = Pipeline([
-                    ('scale', RobustScaler())
-                ])
-                transformers.append(('num', num_pipe, numeric_cols))
-            if categorical_cols:
-                cat_pipe = Pipeline([
-                    ('encode', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
-                ])
-                transformers.append(('cat', cat_pipe, categorical_cols))
-            
-            if not transformers:
-                st.error("Hiçbir sütun işlenemedi.")
-                return
-            
-            preprocessor = ColumnTransformer(transformers)
-            
-            if st.session_state.task == "Classification":
-                model = RandomForestClassifier(n_estimators=n_est, class_weight='balanced', random_state=42)
-            else:
-                model = xgb.XGBRegressor(n_estimators=n_est, learning_rate=0.05, random_state=42)
-            
-            full_pipe = Pipeline([('prep', preprocessor), ('model', model)])
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
-            
-            with st.spinner("Eğitiliyor..."):
-                full_pipe.fit(X_train, y_train)
-                st.session_state.model = full_pipe
-            
-            y_pred = full_pipe.predict(X_test)
-            if st.session_state.task == "Classification":
-                st.text(classification_report(y_test, y_pred))
-                fig, ax = plt.subplots()
-                sns.heatmap(confusion_matrix(y_test, y_pred), annot=True, fmt='d', ax=ax)
-                st.pyplot(fig)
-            else:
-                r2 = r2_score(y_test, y_pred)
-                mape = mean_absolute_percentage_error(y_test, y_pred)
-                col1, col2 = st.columns(2)
-                col1.metric("R²", f"{r2:.4f}")
-                col2.metric("MAPE", f"{mape:.2%}")
-            
-            try:
-                if hasattr(full_pipe.named_steps['model'], 'feature_importances_'):
-                    importances = full_pipe.named_steps['model'].feature_importances_
-                    if categorical_cols and 'cat' in full_pipe.named_steps['prep'].named_transformers_:
-                        ohe = full_pipe.named_steps['prep'].named_transformers_['cat'].named_steps['encode']
-                        ohe_cols = ohe.get_feature_names_out(categorical_cols)
-                        all_features = numeric_cols + list(ohe_cols)
-                    else:
-                        all_features = numeric_cols
-                    feat_imp = pd.Series(importances[:len(all_features)], index=all_features).sort_values(ascending=False).head(10)
-                    st.subheader("🔑 En Önemli Değişkenler")
-                    st.bar_chart(feat_imp)
-            except Exception:
-                pass
-            
-            model_bytes = pickle.dumps(full_pipe)
-            st.download_button("💾 Modeli İndir (.pkl)", data=model_bytes, file_name="model.pkl")
-    
-    # ---------- TAB 3 ----------
-    with tabs[2]:
-        st.header("🎯 Hibrit Öneri Sistemi")
-        user_col = st.selectbox("Kullanıcı ID sütunu", df.columns, key="user_col")
-        item_col = st.selectbox("Ürün/Item ID sütunu", df.columns, key="item_col")
-        
-        if st.button("📌 Öneri Modelini Eğit"):
-            recommender = HybridRecommender(
-                content_columns=st.session_state.content_cols,
-                user_col=user_col,
-                item_col=item_col,
-                rating_col=st.session_state.target
-            )
-            if st.session_state.rec_type != "İşbirlikçi" and st.session_state.content_cols:
-                items_df = df.drop_duplicates(item_col)[[item_col] + st.session_state.content_cols]
-                recommender.fit_content(items_df)
-            if st.session_state.rec_type != "İçerik Tabanlı":
-                ratings_df = df[[user_col, item_col, st.session_state.target]].dropna()
-                if len(ratings_df) > 5:
-                    recommender.fit_collaborative(ratings_df)
-                else:
-                    st.warning("İşbirlikçi için yeterli veri yok.")
-            st.session_state.recommender = recommender
-            st.success("Öneri sistemi eğitildi!")
-        
-        if st.session_state.recommender:
-            user_id_input = st.text_input("Kullanıcı ID girin")
-            if user_id_input:
-                recs = st.session_state.recommender.hybrid_recommend(user_id_input, top_k=5)
-                if recs:
-                    for item, score in recs:
-                        st.write(f"- {item} (skor: {score:.2f})")
-                else:
-                    st.info("Öneri yok.")
-    
-    # ---------- TAB 4 ----------
-    with tabs[3]:
-        st.header("🏭 Production Özellikleri")
-        if st.session_state.model:
-            st.subheader("Batch Inference")
-            if st.button("Tahmin yap"):
-                X = df.drop(columns=[st.session_state.target])
-                preds = st.session_state.model.predict(X)
-                result_df = pd.DataFrame({"Gerçek": df[st.session_state.target], "Tahmin": preds})
-                st.dataframe(result_df.head(100))
-                st.download_button("CSV indir", data=result_df.to_csv(index=False), file_name="predictions.csv")
-            
-            st.subheader("FastAPI Şablonu")
-            st.code("""
-from fastapi import FastAPI
-import pandas as pd
-import pickle
-
-app = FastAPI()
-model = pickle.load(open("model.pkl", "rb"))
-
-@app.post("/predict")
-async def predict(data: dict):
-    df = pd.DataFrame([data])
-    pred = model.predict(df)
-    return {"prediction": pred[0]}
-""", language="python")
+            df = load_data(uploaded_file)
+            st.session_state.df = df.copy()
+            st.session_state.df_original = df.copy()
+            show_first_rows(df)
+            st.info(f"Veri seti boyutu: {df.shape[0]} satır, {df.shape[1]} sütun")
+            if st.button("İleri ➡️"):
+                st.session_state.step = 2
+                st.rerun()
         else:
-            st.info("Önce bir model eğitin.")
+            st.info("Lütfen bir dosya yükleyin.")
+
+    # Adım 2: Genel EDA
+    elif st.session_state.step == 2:
+        st.header("📊 Genel Keşifsel Veri Analizi (EDA)")
+        df = st.session_state.df
+        # Temel bilgiler
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Toplam Satır", df.shape[0])
+            st.metric("Toplam Sütun", df.shape[1])
+            st.metric("Eksik Değer Oranı (%)", round(df.isnull().sum().sum() / (df.shape[0]*df.shape[1])*100, 2))
+        with col2:
+            st.metric("Sayısal Sütunlar", len(df.select_dtypes(include=np.number).columns))
+            st.metric("Kategorik Sütunlar", len(df.select_dtypes(include='object').columns))
+            st.metric("Benzersiz Değerler (ortalama)", round(df.nunique().mean(), 2))
+        
+        # Dağılım grafikleri
+        st.subheader("Sayısal Değişken Dağılımları")
+        numeric_cols = df.select_dtypes(include=np.number).columns
+        if len(numeric_cols) > 0:
+            selected_num = st.selectbox("Sütun seç", numeric_cols)
+            fig, ax = plt.subplots()
+            sns.histplot(df[selected_num].dropna(), kde=True, ax=ax)
+            st.pyplot(fig)
+        else:
+            st.info("Sayısal sütun yok.")
+        
+        st.subheader("Kategorik Değişken Frekansları")
+        categorical_cols = df.select_dtypes(include='object').columns
+        if len(categorical_cols) > 0:
+            selected_cat = st.selectbox("Kategorik sütun seç", categorical_cols)
+            st.dataframe(df[selected_cat].value_counts().head(10))
+            fig, ax = plt.subplots()
+            df[selected_cat].value_counts().head(10).plot(kind='bar', ax=ax)
+            st.pyplot(fig)
+        else:
+            st.info("Kategorik sütun yok.")
+        
+        if st.button("İleri ➡️"):
+            st.session_state.step = 3
+            st.rerun()
+        if st.button("⬅️ Geri"):
+            st.session_state.step = 1
+            st.rerun()
+
+    # Adım 3: Problem Tanımı
+    elif st.session_state.step == 3:
+        st.header("🎯 Problem Tanımı")
+        problem_type = st.radio("Problem tipini seçin", ["Sınıflandırma", "Regresyon", "Kümeleme", "Öneri Sistemi"])
+        problem_map = {"Sınıflandırma": "classification", "Regresyon": "regression", "Kümeleme": "clustering", "Öneri Sistemi": "recommendation"}
+        st.session_state.problem_type = problem_map[problem_type]
+        if st.button("İleri ➡️"):
+            st.session_state.step = 4
+            st.rerun()
+        if st.button("⬅️ Geri"):
+            st.session_state.step = 2
+            st.rerun()
+
+    # Adım 4: Hedef Değişken & Gereksiz Değişkenler
+    elif st.session_state.step == 4:
+        st.header("🎯 Hedef Değişken ve Gereksiz Değişkenler")
+        df = st.session_state.df
+        all_cols = df.columns.tolist()
+        target = st.selectbox("Hedef değişkeni seçin", all_cols)
+        st.session_state.target = target
+        exclude = st.multiselect("Çıkarılacak değişkenler (ID, tarih vb.)", [c for c in all_cols if c != target])
+        st.session_state.exclude_cols = exclude
+        if st.button("İleri ➡️"):
+            # Hedef ve çıkarılacakları uygula
+            df = df.drop(columns=exclude)
+            st.session_state.df = df
+            st.session_state.step = 5
+            st.rerun()
+        if st.button("⬅️ Geri"):
+            st.session_state.step = 3
+            st.rerun()
+
+    # Adım 5: Detaylı Preprocessing (Tip dönüşümleri, eksik veri, aykırı değer, korelasyon, EDA, feature engineering)
+    elif st.session_state.step == 5:
+        st.header("🔧 Detaylı Preprocessing")
+        df = st.session_state.df
+        target = st.session_state.target
+        problem_type = st.session_state.problem_type
+        
+        # Tip dönüşümleri
+        st.subheader("Tip Dönüşümleri")
+        col_types = {}
+        for col in df.columns:
+            if col == target:
+                continue
+            new_type = st.selectbox(f"{col} tipi", ["numeric", "categorical", "datetime"], key=f"type_{col}")
+            col_types[col] = new_type
+        # Dönüşümleri uygula
+        for col, typ in col_types.items():
+            if typ == "numeric":
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            elif typ == "categorical":
+                df[col] = df[col].astype('category')
+            elif typ == "datetime":
+                df[col] = pd.to_datetime(df[col], errors='coerce')
+        st.session_state.df = df
+        
+        # Değişken sınıflandırma
+        st.subheader("Değişken Sınıflandırma")
+        numeric_cols = df.select_dtypes(include=np.number).columns.tolist()
+        categorical_cols = df.select_dtypes(include=['category', 'object']).columns.tolist()
+        if target in numeric_cols:
+            numeric_cols.remove(target)
+        if target in categorical_cols:
+            categorical_cols.remove(target)
+        st.write(f"Sayısal değişkenler: {numeric_cols}")
+        st.write(f"Kategorik değişkenler: {categorical_cols}")
+        st.session_state.numeric_cols = numeric_cols
+        st.session_state.categorical_cols = categorical_cols
+        
+        # Eksik veri analizi
+        st.subheader("Eksik Veri Analizi")
+        missing = df.isnull().sum()
+        missing = missing[missing > 0]
+        if len(missing) > 0:
+            st.dataframe(missing)
+            # Kullanıcıdan strateji seçimi (daha sonra pipeline'da kullanılacak)
+            num_impute_strategy = st.selectbox("Sayısal eksik değer stratejisi", ["median", "mean", "constant"], key="num_impute")
+            cat_impute_strategy = st.selectbox("Kategorik eksik değer stratejisi", ["most_frequent", "constant"], key="cat_impute")
+            st.session_state.preprocessing_config['num_impute'] = num_impute_strategy
+            st.session_state.preprocessing_config['cat_impute'] = cat_impute_strategy
+        else:
+            st.success("Eksik değer yok.")
+        
+        # Aykırı değer analizi (sadece sayısal)
+        st.subheader("Aykırı Değer Analizi")
+        if numeric_cols:
+            outlier_method = st.selectbox("Aykırı değer yöntemi", ["IQR", "Z-Score", "Isolation Forest"], key="outlier_method")
+            st.session_state.preprocessing_config['outlier_method'] = outlier_method
+            # Kullanıcıya aykırı değerleri görselleştir
+            selected_num = st.selectbox("Aykırı değer gösterilecek sütun", numeric_cols)
+            fig, ax = plt.subplots()
+            sns.boxplot(x=df[selected_num], ax=ax)
+            st.pyplot(fig)
+        else:
+            st.info("Sayısal değişken yok, aykırı değer analizi atlanıyor.")
+        
+        # Korelasyon & İstatistik
+        st.subheader("Korelasyon ve Normallik Testi")
+        if len(numeric_cols) > 1:
+            corr = df[numeric_cols].corr()
+            fig, ax = plt.subplots(figsize=(10, 8))
+            sns.heatmap(corr, annot=True, fmt='.2f', cmap='coolwarm', ax=ax)
+            st.pyplot(fig)
+        # Normallik testi (hedef değişken için)
+        if target in df.columns and df[target].dtype in [np.number]:
+            stat, p = stats.normaltest(df[target].dropna())
+            st.write(f"Hedef değişken {target} için normallik testi p-değeri: {p:.4f} -> {'Normal dağılım' if p > 0.05 else 'Normal dağılım değil'}")
+        
+        # EDA Görselleştirme
+        st.subheader("Gelişmiş EDA Görselleştirmeleri")
+        plot_type = st.selectbox("Grafik türü", ["Histogram", "Kutu Grafiği", "Scatter", "Isı Haritası"])
+        if plot_type == "Histogram":
+            col = st.selectbox("Sütun", df.columns)
+            fig, ax = plt.subplots()
+            sns.histplot(df[col].dropna(), kde=True, ax=ax)
+            st.pyplot(fig)
+        elif plot_type == "Kutu Grafiği":
+            col = st.selectbox("Sütun", df.columns)
+            fig, ax = plt.subplots()
+            sns.boxplot(x=df[col], ax=ax)
+            st.pyplot(fig)
+        elif plot_type == "Scatter":
+            x_col = st.selectbox("X sütunu", numeric_cols)
+            y_col = st.selectbox("Y sütunu", numeric_cols)
+            fig, ax = plt.subplots()
+            sns.scatterplot(data=df, x=x_col, y=y_col, ax=ax)
+            st.pyplot(fig)
+        elif plot_type == "Isı Haritası":
+            if len(numeric_cols) > 1:
+                fig, ax = plt.subplots()
+                sns.heatmap(df[numeric_cols].corr(), annot=True, ax=ax)
+                st.pyplot(fig)
+            else:
+                st.info("Yeterli sayısal sütun yok.")
+        
+        # Feature Engineering (basit örnek)
+        st.subheader("Feature Engineering (Opsiyonel)")
+        if st.checkbox("Yeni özellikler oluştur"):
+            new_feat = st.text_input("Yeni özellik adı")
+            expr = st.text_input("İfade (örnek: col1 + col2)")
+            if new_feat and expr:
+                try:
+                    df[new_feat] = eval(expr)
+                    st.success(f"{new_feat} eklendi.")
+                    st.session_state.df = df
+                    # Yeni sütunu uygun şekilde numeric/categorical olarak ekle
+                    if df[new_feat].dtype == 'object':
+                        st.session_state.categorical_cols.append(new_feat)
+                    else:
+                        st.session_state.numeric_cols.append(new_feat)
+                except Exception as e:
+                    st.error(f"Hata: {e}")
+        
+        if st.button("İleri ➡️"):
+            st.session_state.step = 6
+            st.rerun()
+        if st.button("⬅️ Geri"):
+            st.session_state.step = 4
+            st.rerun()
+
+    # Adım 6: Train/Test Split
+    elif st.session_state.step == 6:
+        st.header("📊 Train/Test Split")
+        test_size = st.slider("Test seti oranı (%)", 10, 40, 20) / 100
+        st.session_state.test_size = test_size
+        if st.button("Split'i Uygula"):
+            df = st.session_state.df
+            target = st.session_state.target
+            X = df.drop(columns=[target])
+            y = df[target]
+            # Veri sızıntısı olmadan split
+            X_train, X_test, y_train, y_test = split_data(X, y, test_size, st.session_state.random_state)
+            st.session_state.X_train = X_train
+            st.session_state.X_test = X_test
+            st.session_state.y_train = y_train
+            st.session_state.y_test = y_test
+            st.success(f"Train: {X_train.shape[0]} satır, Test: {X_test.shape[0]} satır")
+            st.session_state.step = 7
+            st.rerun()
+        if st.button("⬅️ Geri"):
+            st.session_state.step = 5
+            st.rerun()
+
+    # Adım 7: Pipeline Konfigürasyonu (imputation, scaling, encoding, outlier handling)
+    elif st.session_state.step == 7:
+        st.header("🔧 Pipeline Konfigürasyonu")
+        numeric_cols = st.session_state.numeric_cols
+        categorical_cols = st.session_state.categorical_cols
+        num_impute = st.session_state.preprocessing_config.get('num_impute', 'median')
+        cat_impute = st.session_state.preprocessing_config.get('cat_impute', 'most_frequent')
+        
+        # Scaling seçimi
+        scaler_type = st.selectbox("Sayısal ölçeklendirme", ["RobustScaler", "StandardScaler", "MinMaxScaler", "Hiçbiri"])
+        scaler_map = {"RobustScaler": RobustScaler(), "StandardScaler": StandardScaler(), "MinMaxScaler": MinMaxScaler(), "Hiçbiri": None}
+        scaler = scaler_map[scaler_type]
+        
+        # Encoding seçimi
+        encoder_type = st.selectbox("Kategorik kodlama", ["OneHotEncoder", "LabelEncoder (sadece hedef için)"])
+        # Pipeline oluştur
+        transformers = []
+        if numeric_cols:
+            num_pipe = []
+            if num_impute:
+                num_pipe.append(('impute', SimpleImputer(strategy=num_impute)))
+            if scaler:
+                num_pipe.append(('scale', scaler))
+            if num_pipe:
+                transformers.append(('num', Pipeline(num_pipe), numeric_cols))
+        if categorical_cols:
+            cat_pipe = []
+            if cat_impute:
+                cat_pipe.append(('impute', SimpleImputer(strategy=cat_impute)))
+            if encoder_type == "OneHotEncoder":
+                cat_pipe.append(('encode', OneHotEncoder(handle_unknown='ignore', sparse_output=False)))
+            if cat_pipe:
+                transformers.append(('cat', Pipeline(cat_pipe), categorical_cols))
+        
+        preprocessor = ColumnTransformer(transformers) if transformers else None
+        st.session_state.preprocessor = preprocessor
+        st.success("Pipeline konfigürasyonu tamamlandı.")
+        
+        if st.button("İleri ➡️"):
+            st.session_state.step = 8
+            st.rerun()
+        if st.button("⬅️ Geri"):
+            st.session_state.step = 6
+            st.rerun()
+
+    # Adım 8: Model Karşılaştırma
+    elif st.session_state.step == 8:
+        st.header("🤖 Model Karşılaştırma")
+        problem_type = st.session_state.problem_type
+        if problem_type in ['classification', 'regression']:
+            models = get_model_list(problem_type)
+            selected_models = st.multiselect("Karşılaştırılacak modelleri seçin", list(models.keys()), default=list(models.keys())[:3])
+            if st.button("Modelleri Eğit ve Karşılaştır"):
+                X_train = st.session_state.X_train
+                y_train = st.session_state.y_train
+                X_test = st.session_state.X_test
+                y_test = st.session_state.y_test
+                preprocessor = st.session_state.preprocessor
+                results = {}
+                for name in selected_models:
+                    with st.spinner(f"{name} eğitiliyor..."):
+                        model = models[name]
+                        if preprocessor:
+                            pipe = Pipeline([('prep', preprocessor), ('model', model)])
+                        else:
+                            pipe = Pipeline([('model', model)])
+                        pipe.fit(X_train, y_train)
+                        if problem_type == 'classification':
+                            metrics = evaluate_classification(pipe, X_test, y_test)
+                        else:
+                            metrics = evaluate_regression(pipe, X_test, y_test)
+                        results[name] = metrics
+                        st.session_state.models[name] = pipe
+                st.session_state.model_comparison = results
+                # Sonuçları göster
+                st.subheader("Karşılaştırma Sonuçları")
+                results_df = pd.DataFrame(results).T
+                st.dataframe(results_df)
+                # En iyi modeli seç
+                if problem_type == 'classification':
+                    best_model = max(results, key=lambda x: results[x]['Accuracy'])
+                else:
+                    best_model = max(results, key=lambda x: results[x]['R2'])
+                st.success(f"En iyi model: {best_model}")
+                st.session_state.best_model_name = best_model
+                st.session_state.best_model = st.session_state.models[best_model]
+        elif problem_type == 'clustering':
+            st.info("Kümeleme için model karşılaştırması henüz eklenmedi.")
+        else:
+            st.info("Öneri sistemi için model karşılaştırması farklı şekilde yapılacak.")
+        
+        if st.button("İleri ➡️"):
+            st.session_state.step = 9
+            st.rerun()
+        if st.button("⬅️ Geri"):
+            st.session_state.step = 7
+            st.rerun()
+
+    # Adım 9: Hiperparametre Tuning
+    elif st.session_state.step == 9:
+        st.header("🔧 Hiperparametre Optimizasyonu")
+        if 'best_model_name' in st.session_state:
+            model_name = st.session_state.best_model_name
+            param_grid = get_param_grid(model_name, st.session_state.problem_type)
+            if param_grid:
+                st.write(f"Seçilen model: {model_name}")
+                st.json(param_grid)
+                # Kullanıcıya parametreleri düzenleme imkanı
+                new_params = {}
+                for param, values in param_grid.items():
+                    new_params[param] = st.multiselect(f"{param}", values, default=values)
+                if st.button("Grid Search Başlat"):
+                    model = get_model_list(st.session_state.problem_type)[model_name]
+                    preprocessor = st.session_state.preprocessor
+                    pipe = Pipeline([('prep', preprocessor), ('model', model)]) if preprocessor else Pipeline([('model', model)])
+                    grid = GridSearchCV(pipe, param_grid={'model__' + k: v for k, v in new_params.items()}, cv=5, scoring='accuracy' if st.session_state.problem_type == 'classification' else 'r2', n_jobs=-1)
+                    grid.fit(st.session_state.X_train, st.session_state.y_train)
+                    st.session_state.best_model = grid.best_estimator_
+                    st.session_state.best_params = grid.best_params_
+                    st.success(f"En iyi parametreler: {grid.best_params_}")
+                    st.write(f"En iyi skor: {grid.best_score_:.4f}")
+            else:
+                st.info("Bu model için parametre grid'i tanımlı değil, tuning atlanıyor.")
+        else:
+            st.warning("Önce model karşılaştırması yapmalısınız.")
+        
+        if st.button("İleri ➡️"):
+            st.session_state.step = 10
+            st.rerun()
+        if st.button("⬅️ Geri"):
+            st.session_state.step = 8
+            st.rerun()
+
+    # Adım 10: Cross Validation
+    elif st.session_state.step == 10:
+        st.header("📈 Cross Validation")
+        if 'best_model' in st.session_state:
+            cv_folds = st.slider("Katman sayısı", 3, 10, 5)
+            if st.button("CV Uygula"):
+                model = st.session_state.best_model
+                X = st.session_state.X_train
+                y = st.session_state.y_train
+                if st.session_state.problem_type == 'classification':
+                    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=st.session_state.random_state)
+                    scoring = 'accuracy'
+                else:
+                    cv = KFold(n_splits=cv_folds, shuffle=True, random_state=st.session_state.random_state)
+                    scoring = 'r2'
+                scores = cross_val_score(model, X, y, cv=cv, scoring=scoring)
+                st.write(f"Ortalama {scoring}: {scores.mean():.4f} (+/- {scores.std()*2:.4f})")
+                st.session_state.cv_results = scores
+        else:
+            st.warning("Önce bir model eğitmelisiniz.")
+        if st.button("İleri ➡️"):
+            st.session_state.step = 11
+            st.rerun()
+        if st.button("⬅️ Geri"):
+            st.session_state.step = 9
+            st.rerun()
+
+    # Adım 11: Stacking & Ensemble
+    elif st.session_state.step == 11:
+        st.header("🧩 Stacking & Ensemble")
+        if st.session_state.problem_type in ['classification', 'regression']:
+            models_list = list(st.session_state.models.values())
+            model_names = list(st.session_state.models.keys())
+            selected_ensemble = st.multiselect("Ensemble'da kullanılacak modeller", model_names, default=model_names[:2])
+            if selected_ensemble:
+                estimators = [(name, st.session_state.models[name]) for name in selected_ensemble]
+                if st.session_state.problem_type == 'classification':
+                    stacking = StackingClassifier(estimators=estimators, final_estimator=LogisticRegression())
+                else:
+                    stacking = StackingRegressor(estimators=estimators, final_estimator=LinearRegression())
+                if st.button("Stacking Modeli Eğit"):
+                    stacking.fit(st.session_state.X_train, st.session_state.y_train)
+                    st.session_state.stacking_model = stacking
+                    if st.session_state.problem_type == 'classification':
+                        metrics = evaluate_classification(stacking, st.session_state.X_test, st.session_state.y_test)
+                    else:
+                        metrics = evaluate_regression(stacking, st.session_state.X_test, st.session_state.y_test)
+                    st.write("Stacking Model Performansı:")
+                    st.json(metrics)
+            else:
+                st.info("En az iki model seçin.")
+        else:
+            st.info("Kümeleme veya öneri sistemi için ensemble bu sürümde desteklenmiyor.")
+        if st.button("İleri ➡️"):
+            st.session_state.step = 12
+            st.rerun()
+        if st.button("⬅️ Geri"):
+            st.session_state.step = 10
+            st.rerun()
+
+    # Adım 12: Model Yorumlama
+    elif st.session_state.step == 12:
+        st.header("📖 Model Yorumlama")
+        if st.session_state.best_model:
+            # Feature importance (varsa)
+            model = st.session_state.best_model
+            # Pipeline içindeki modeli bul
+            if hasattr(model, 'named_steps'):
+                real_model = model.named_steps['model']
+            else:
+                real_model = model
+            if hasattr(real_model, 'feature_importances_'):
+                # Özellik isimlerini al
+                if st.session_state.preprocessor:
+                    # Preprocessor ile feature isimlerini almak karmaşık, basitçe sütun isimlerini göster
+                    feature_names = st.session_state.X_train.columns.tolist()
+                    importances = real_model.feature_importances_
+                    # Sadece ilk n kadar
+                    if len(importances) != len(feature_names):
+                        st.warning("Özellik isimleri uyuşmuyor, sadece önem değerleri gösteriliyor.")
+                        st.bar_chart(importances[:20])
+                    else:
+                        feat_imp = pd.Series(importances, index=feature_names).sort_values(ascending=False).head(20)
+                        st.bar_chart(feat_imp)
+                else:
+                    feature_names = st.session_state.X_train.columns
+                    importances = real_model.feature_importances_
+                    feat_imp = pd.Series(importances, index=feature_names).sort_values(ascending=False).head(20)
+                    st.bar_chart(feat_imp)
+            elif hasattr(real_model, 'coef_'):
+                coefs = real_model.coef_[0] if real_model.coef_.ndim > 1 else real_model.coef_
+                feature_names = st.session_state.X_train.columns
+                coef_imp = pd.Series(coefs, index=feature_names).sort_values(key=abs, ascending=False).head(20)
+                st.bar_chart(coef_imp)
+            else:
+                st.info("Bu model için özellik önemi çıkarılamadı.")
+            
+            # SHAP değerleri (opsiyonel)
+            if st.checkbox("SHAP değerlerini göster (zaman alabilir)"):
+                try:
+                    import shap
+                    explainer = shap.Explainer(real_model, st.session_state.X_train)
+                    shap_values = explainer(st.session_state.X_test)
+                    st.pyplot(shap.summary_plot(shap_values, st.session_state.X_test, show=False))
+                except Exception as e:
+                    st.error(f"SHAP hatası: {e}")
+        else:
+            st.warning("Model bulunamadı.")
+        if st.button("🏁 Bitir"):
+            st.balloons()
+            st.success("Pipeline tamamlandı!")
+        if st.button("⬅️ Geri"):
+            st.session_state.step = 11
+            st.rerun()
 
 if __name__ == "__main__":
     main()
