@@ -1,5 +1,3 @@
-!pip install openpyxl
-!pip install mlflow statsmodels
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -28,7 +26,6 @@ from sklearn.metrics import (classification_report, confusion_matrix, r2_score,
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans, DBSCAN
 from sklearn.neighbors import NearestNeighbors
-from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 import xgboost as xgb
@@ -70,13 +67,12 @@ if 'df' not in st.session_state:
         'task': 'Classification',
         'recommender': None,
         'user_item_matrix': None,
-        'rec_type': 'content'
+        'rec_type': 'content',
+        'content_cols': []
     })
 
-# ------------------ İSTATİSTİKSEL ANALİZ MOTORU (statsmodels kontrollü) ------------------
+# ------------------ İSTATİSTİKSEL ANALİZ MOTORU ------------------
 class StatisticalEngine:
-    """Doktora seviyesinde istatistiksel testler ve analizler"""
-    
     @staticmethod
     def normality_test(data, col):
         ser = data[col].dropna()
@@ -128,7 +124,6 @@ class StatisticalEngine:
     
     @staticmethod
     def vif_analysis(X):
-        """VIF - sadece statsmodels varsa çalışır"""
         if not STATSMODELS_AVAILABLE:
             return None
         X_const = sm.add_constant(X)
@@ -140,6 +135,8 @@ class StatisticalEngine:
     @staticmethod
     def outlier_detection(data, method='iqr', contamination=0.1):
         num_cols = data.select_dtypes(include=[np.number]).columns
+        if len(num_cols) == 0:
+            return pd.Series([False]*len(data))
         if method == 'iqr':
             outliers = pd.DataFrame(index=data.index)
             for col in num_cols:
@@ -151,7 +148,7 @@ class StatisticalEngine:
         elif method == 'zscore':
             from scipy.stats import zscore
             z_scores = np.abs(zscore(data[num_cols].fillna(data[num_cols].median())))
-            return z_scores > 3
+            return (z_scores > 3).any(axis=1)
         elif method == 'isolation_forest':
             iso = IsolationForest(contamination=contamination, random_state=42)
             preds = iso.fit_predict(data[num_cols].fillna(data[num_cols].median()))
@@ -166,21 +163,26 @@ class StatisticalEngine:
             num_scaled = scaler.fit_transform(num_data)
         else:
             num_scaled = num_data.values
-        pca = PCA(n_components=min(n_components, num_scaled.shape[1]))
+        n_comp = min(n_components, num_scaled.shape[1])
+        pca = PCA(n_components=n_comp)
         pcs = pca.fit_transform(num_scaled)
         explained_var = pca.explained_variance_ratio_
         return pcs, explained_var, pca
     
     @staticmethod
     def time_series_analysis(series, order=(1,1,1), seasonal=False):
-        """ARIMA - sadece statsmodels varsa"""
         if not STATSMODELS_AVAILABLE:
             return None
-        adf = adfuller(series.dropna())
+        series_clean = series.dropna()
+        if len(series_clean) < 10:
+            return None
+        adf = adfuller(series_clean)
         is_stationary = adf[1] < 0.05
-        if not is_stationary and seasonal:
-            series = series.diff(12).dropna()
-        model = ARIMA(series, order=order)
+        if not is_stationary and seasonal and len(series_clean) > 24:
+            series_clean = series_clean.diff(12).dropna()
+        if len(series_clean) < 5:
+            return None
+        model = ARIMA(series_clean, order=order)
         fitted = model.fit()
         forecast = fitted.forecast(steps=10)
         return {
@@ -191,10 +193,94 @@ class StatisticalEngine:
             "aic": fitted.aic
         }
 
-# ------------------ ÖNERİ SİSTEMİ (aynı, değişmedi) ------------------
+# ------------------ HİBRİT ÖNERİ SİSTEMİ ------------------
 class HybridRecommender:
-    # ... (önceki kodun aynısı, kısaltmak için burada tekrar yazmıyorum, ancak çalışması için gerekli)
-    pass
+    def __init__(self, content_columns=None, user_col='user_id', item_col='item_id', rating_col='rating'):
+        self.content_columns = content_columns if content_columns else []
+        self.user_col = user_col
+        self.item_col = item_col
+        self.rating_col = rating_col
+        self.content_sim_matrix = None
+        self.user_factors = None
+        self.item_factors = None
+        self.user_encoder = None
+        self.item_encoder = None
+        self.is_fitted = False
+    
+    def fit_content(self, df_items):
+        """İçerik tabanlı benzerlik matrisi"""
+        if len(self.content_columns) == 0:
+            return
+        features = df_items[self.content_columns].copy()
+        cat_cols = features.select_dtypes(include=['object', 'category']).columns
+        for col in cat_cols:
+            features[col] = LabelEncoder().fit_transform(features[col].astype(str))
+        features = features.fillna(features.median())
+        scaler = StandardScaler()
+        feature_matrix = scaler.fit_transform(features)
+        self.content_sim_matrix = cosine_similarity(feature_matrix)
+        return self.content_sim_matrix
+    
+    def fit_collaborative(self, df_ratings, n_factors=20):
+        """İşbirlikçi filtreleme için SVD"""
+        if df_ratings.empty:
+            return
+        self.user_encoder = {uid: i for i, uid in enumerate(df_ratings[self.user_col].unique())}
+        self.item_encoder = {iid: i for i, iid in enumerate(df_ratings[self.item_col].unique())}
+        n_users = len(self.user_encoder)
+        n_items = len(self.item_encoder)
+        matrix = np.zeros((n_users, n_items))
+        for _, row in df_ratings.iterrows():
+            u = self.user_encoder[row[self.user_col]]
+            i = self.item_encoder[row[self.item_col]]
+            matrix[u, i] = row[self.rating_col]
+        n_comp = min(n_factors, n_users-1, n_items-1)
+        if n_comp < 1:
+            return
+        svd = TruncatedSVD(n_components=n_comp)
+        self.user_factors = svd.fit_transform(matrix)
+        self.item_factors = svd.components_.T
+        self.is_fitted = True
+    
+    def recommend_collaborative(self, user_id, top_k=5):
+        if not self.is_fitted or self.user_factors is None:
+            return []
+        u = self.user_encoder.get(user_id, None)
+        if u is None:
+            return []
+        user_vec = self.user_factors[u]
+        predictions = np.dot(self.item_factors, user_vec)
+        top_items = np.argsort(predictions)[-top_k:][::-1]
+        # ID'leri geri çevir
+        inv_item_encoder = {v: k for k, v in self.item_encoder.items()}
+        return [(inv_item_encoder[i], predictions[i]) for i in top_items if i in inv_item_encoder]
+    
+    def recommend_content(self, item_id, top_k=5):
+        if self.content_sim_matrix is None:
+            return []
+        # item_id'den index bul
+        if self.item_encoder is None or item_id not in self.item_encoder:
+            return []
+        idx = self.item_encoder[item_id]
+        sim_scores = list(enumerate(self.content_sim_matrix[idx]))
+        sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+        inv_item_encoder = {v: k for k, v in self.item_encoder.items()}
+        result = []
+        for i, score in sim_scores[1:top_k+1]:
+            if i in inv_item_encoder:
+                result.append((inv_item_encoder[i], score))
+        return result
+    
+    def hybrid_recommend(self, user_id, item_id=None, alpha=0.5, top_k=5):
+        collab_recs = self.recommend_collaborative(user_id, top_k=top_k*2)
+        content_recs = self.recommend_content(item_id, top_k=top_k*2) if item_id else []
+        combined = {}
+        for item, score in collab_recs:
+            combined[item] = combined.get(item, 0) + alpha * score
+        for item, score in content_recs:
+            combined[item] = combined.get(item, 0) + (1-alpha) * score
+        sorted_recs = sorted(combined.items(), key=lambda x: x[1], reverse=True)[:top_k]
+        return sorted_recs
 
 # ------------------ STREAMLIT UI ------------------
 def main():
@@ -206,20 +292,23 @@ def main():
     if not MLFLOW_AVAILABLE:
         st.info("📌 Not: 'mlflow' yüklü değil. Model loglama devre dışı. Kurmak için: `pip install mlflow`")
     
-    # Sidebar: Veri yükleme (öncekiyle aynı)
+    # Sidebar
     with st.sidebar:
-        st.header("📂 Veri")
+        st.header("📂 Veri Yükleme")
         uploaded_file = st.file_uploader("CSV veya Excel", type=['csv', 'xlsx'])
         if uploaded_file:
-            if uploaded_file.name.endswith('.csv'):
-                st.session_state.df = pd.read_csv(uploaded_file)
-            else:
-                st.session_state.df = pd.read_excel(uploaded_file)
-            st.success(f"✅ {st.session_state.df.shape[0]} satır, {st.session_state.df.shape[1]} sütun")
+            try:
+                if uploaded_file.name.endswith('.csv'):
+                    st.session_state.df = pd.read_csv(uploaded_file)
+                else:
+                    st.session_state.df = pd.read_excel(uploaded_file, engine='openpyxl')
+                st.success(f"✅ {st.session_state.df.shape[0]} satır, {st.session_state.df.shape[1]} sütun")
+            except Exception as e:
+                st.error(f"Dosya okuma hatası: {e}")
         
         if st.session_state.df is not None:
             st.divider()
-            st.session_state.target = st.selectbox("🎯 Hedef Değişken", st.session_state.df.columns)
+            st.session_state.target = st.selectbox("🎯 Hedef Değişken (Y)", st.session_state.df.columns)
             st.session_state.task = st.radio("Görev Tipi", ["Classification", "Regression"])
             
             st.divider()
@@ -234,12 +323,10 @@ def main():
         return
     
     df = st.session_state.df
+    tabs = st.tabs(["📊 İstatistiksel Analiz", "🤖 ML Model", "🎯 Öneri Sistemi", "🏭 Production"])
     
-    # Tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 İstatistiksel Analiz", "🤖 ML Model", "🎯 Öneri Sistemi", "🏭 Production"])
-    
-    # ---------- TAB 1 ----------
-    with tab1:
+    # ---------- TAB 1: İstatistik ----------
+    with tabs[0]:
         st.subheader("🔬 İleri İstatistiksel Analiz Motoru")
         col_sel = st.selectbox("Analiz edilecek sütun", df.columns)
         
@@ -262,7 +349,7 @@ def main():
             sns.heatmap(corr_matrix, annot=True, fmt='.2f', cmap='coolwarm', ax=ax)
             st.pyplot(fig)
         
-        with st.expander("🔍 PCA"):
+        with st.expander("🔍 PCA (Temel Bileşen Analizi)"):
             n_comp = st.slider("Bileşen sayısı", 2, min(10, df.shape[1]-1), 2)
             pcs, var_exp, _ = StatisticalEngine.pca_analysis(df, n_components=n_comp)
             st.write(f"Açıklanan varyans: {var_exp.cumsum()[-1]:.2%}")
@@ -270,15 +357,15 @@ def main():
             ax2.bar(range(1, len(var_exp)+1), var_exp, alpha=0.7)
             st.pyplot(fig2)
         
-        with st.expander("⚠️ Aykırı Değerler"):
+        with st.expander("⚠️ Aykırı Değer Tespiti"):
             method = st.selectbox("Yöntem", ["iqr", "zscore", "isolation_forest"])
             outliers = StatisticalEngine.outlier_detection(df, method=method)
             st.write(f"Aykırı değer sayısı: {outliers.sum()} / {len(df)}")
             if outliers.sum() > 0:
                 st.dataframe(df[outliers].head())
     
-    # ---------- TAB 2 (ML Model) öncekiyle aynı ----------
-    with tab2:
+    # ---------- TAB 2: ML Model ----------
+    with tabs[1]:
         st.header("🤖 AutoML Eğitimi")
         n_est = st.slider("N_estimators", 50, 500, 100)
         test_size = st.slider("Test oranı", 0.1, 0.4, 0.2)
@@ -292,7 +379,7 @@ def main():
             
             num_pipe = Pipeline([('impute', SimpleImputer(strategy='median')), ('scale', RobustScaler())])
             cat_pipe = Pipeline([('impute', SimpleImputer(strategy='most_frequent')), 
-                                 ('encode', OneHotEncoder(handle_unknown='ignore'))])
+                                 ('encode', OneHotEncoder(handle_unknown='ignore', sparse_output=False))])
             preprocessor = ColumnTransformer([('num', num_pipe, numeric_cols), ('cat', cat_pipe, categorical_cols)])
             
             if st.session_state.task == "Classification":
@@ -302,8 +389,10 @@ def main():
             
             full_pipe = Pipeline([('prep', preprocessor), ('model', model)])
             X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
-            full_pipe.fit(X_train, y_train)
-            st.session_state.model = full_pipe
+            
+            with st.spinner("Model eğitiliyor..."):
+                full_pipe.fit(X_train, y_train)
+                st.session_state.model = full_pipe
             
             y_pred = full_pipe.predict(X_test)
             if st.session_state.task == "Classification":
@@ -314,8 +403,9 @@ def main():
             else:
                 r2 = r2_score(y_test, y_pred)
                 mape = mean_absolute_percentage_error(y_test, y_pred)
-                st.metric("R²", f"{r2:.4f}")
-                st.metric("MAPE", f"{mape:.2%}")
+                col1, col2 = st.columns(2)
+                col1.metric("R² (Açıklanan Varyans)", f"{r2:.4f}")
+                col2.metric("MAPE (Ortalama Hata)", f"{mape:.2%}")
             
             # Feature importance
             try:
@@ -323,41 +413,69 @@ def main():
                 ohe_cols = full_pipe.named_steps['prep'].transformers_[1][1].named_steps['encode'].get_feature_names_out(categorical_cols)
                 all_features = list(numeric_cols) + list(ohe_cols)
                 feat_imp = pd.Series(importances[:len(all_features)], index=all_features).sort_values(ascending=False).head(10)
-                st.subheader("Önemli Değişkenler")
+                st.subheader("🔑 En Önemli Değişkenler")
                 st.bar_chart(feat_imp)
-            except:
-                pass
+            except Exception as e:
+                st.info("Öznitelik önemi gösterilemiyor.")
             
             model_bytes = pickle.dumps(full_pipe)
-            st.download_button("💾 Modeli İndir", data=model_bytes, file_name="model.pkl")
+            st.download_button("💾 Modeli İndir (.pkl)", data=model_bytes, file_name="model.pkl")
     
-    # ---------- TAB 3 (Öneri Sistemi) ----------
-    with tab3:
+    # ---------- TAB 3: Öneri Sistemi ----------
+    with tabs[2]:
         st.header("🎯 Hibrit Öneri Sistemi")
+        
         # Kullanıcı ve ürün sütunlarını seç
-        if 'user_col' not in st.session_state:
-            st.session_state.user_col = st.selectbox("Kullanıcı ID sütunu", df.columns)
-            st.session_state.item_col = st.selectbox("Ürün/Item ID sütunu", df.columns)
-            st.session_state.rating_col = st.session_state.target
+        user_col = st.selectbox("Kullanıcı ID sütunu", df.columns, key="user_col")
+        item_col = st.selectbox("Ürün/Item ID sütunu", df.columns, key="item_col")
+        rating_col = st.session_state.target
         
         if st.button("📌 Öneri Modelini Eğit"):
-            # Basit demo - gerçek implementasyonu yukarıdaki gibi
-            st.success("Öneri sistemi eğitildi (demo modu).")
+            recommender = HybridRecommender(
+                content_columns=st.session_state.content_cols,
+                user_col=user_col,
+                item_col=item_col,
+                rating_col=rating_col
+            )
+            # İçerik tabanlı
+            if st.session_state.rec_type != "İşbirlikçi" and st.session_state.content_cols:
+                items_df = df.drop_duplicates(item_col)[[item_col] + st.session_state.content_cols]
+                recommender.fit_content(items_df)
+            # İşbirlikçi
+            if st.session_state.rec_type != "İçerik Tabanlı":
+                ratings_df = df[[user_col, item_col, rating_col]].dropna()
+                if len(ratings_df) > 5:
+                    recommender.fit_collaborative(ratings_df)
+                else:
+                    st.warning("İşbirlikçi filtreleme için yeterli veri yok.")
+            st.session_state.recommender = recommender
+            st.success("Öneri sistemi eğitildi!")
+        
+        if st.session_state.recommender:
+            user_id_input = st.text_input("Kullanıcı ID girin (örnek)")
+            if user_id_input:
+                recs = st.session_state.recommender.hybrid_recommend(user_id_input, top_k=5)
+                if recs:
+                    st.write("Önerilen ürünler:")
+                    for item, score in recs:
+                        st.write(f"- {item} (skor: {score:.2f})")
+                else:
+                    st.info("Bu kullanıcı için öneri bulunamadı.")
     
-    # ---------- TAB 4 (Production) ----------
-    with tab4:
+    # ---------- TAB 4: Production ----------
+    with tabs[3]:
         st.header("🏭 Production-Grade Özellikler")
         if st.session_state.model:
-            st.subheader("Batch Inference")
+            st.subheader("Batch Inference (Toplu Tahmin)")
             if st.button("Test setinde batch tahmin yap"):
                 X = df.drop(columns=[st.session_state.target])
                 y_true = df[st.session_state.target]
                 preds = st.session_state.model.predict(X)
                 result_df = pd.DataFrame({"Gerçek": y_true, "Tahmin": preds})
                 st.dataframe(result_df.head(100))
-                st.download_button("Sonuçları CSV olarak indir", data=result_df.to_csv(index=False), file_name="predictions.csv")
+                st.download_button("📥 Sonuçları CSV olarak indir", data=result_df.to_csv(index=False), file_name="predictions.csv")
             
-            st.subheader("FastAPI Endpoint Şablonu")
+            st.subheader("🚀 FastAPI Endpoint Şablonu")
             st.code("""
 from fastapi import FastAPI
 import pandas as pd
@@ -374,7 +492,7 @@ async def predict(data: dict):
 """, language="python")
             
             if MLFLOW_AVAILABLE:
-                if st.button("MLflow'a modeli logla"):
+                if st.button("📊 MLflow'a modeli logla"):
                     with mlflow.start_run():
                         mlflow.sklearn.log_model(st.session_state.model, "model")
                         mlflow.log_param("task", st.session_state.task)
@@ -382,6 +500,8 @@ async def predict(data: dict):
                     st.success("Model MLflow'a kaydedildi!")
             else:
                 st.info("MLflow yüklü değil. Model loglama için `pip install mlflow`")
+        else:
+            st.info("Önce bir model eğitin.")
 
 if __name__ == "__main__":
     main()
